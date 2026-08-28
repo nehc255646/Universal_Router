@@ -113,7 +113,7 @@ def _maybe_half_open(s: ProviderStats, cooldown_s: float) -> None:
 
 
 def is_available(pid: str, *, enabled: bool, cooldown_s: float) -> bool:
-    """closed 可用；open 冷却后半开可探测一次；半开仅允许一次探测。"""
+    """closed 可用；open 冷却后半开可探测一次；半开仅允许一次并发探测。"""
     if not enabled:
         return False
     with _lock:
@@ -122,6 +122,9 @@ def is_available(pid: str, *, enabled: bool, cooldown_s: float) -> bool:
         if s.state == "closed":
             return True
         if s.state == "half_open":
+            if s.half_open_probe:
+                return False
+            s.half_open_probe = True
             return True
         return False
 

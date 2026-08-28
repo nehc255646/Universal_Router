@@ -6,7 +6,14 @@ import json
 from fastapi.testclient import TestClient
 
 from app.config import AppConfig, ModelInfo, ProviderConfig, ServerConfig
-from app.health import record_failure, record_success, reset_health, snapshot
+from app.health import (
+    _stats,
+    is_available,
+    record_failure,
+    record_success,
+    reset_health,
+    snapshot,
+)
 from app.ir import items_to_messages, messages_to_items
 from app.main import app
 from app.router import resolve_providers
@@ -238,3 +245,56 @@ def test_latency_and_cost_strategies(isolated_config):
     assert resolve_providers("m")[0].id == "fast"
     isolated_config._config.server.route_strategy = "health"
     assert resolve_providers("m")[0].id in ("fast", "slow")
+
+
+def test_half_open_allows_single_probe(isolated_config):
+    reset_health()
+    record_failure("a", error="x", threshold=1)
+    assert snapshot("a")["state"] == "open"
+    _stats["a"].opened_at = 0.0  # 模拟冷却已过
+    assert is_available("a", enabled=True, cooldown_s=30) is True
+    assert snapshot("a")["state"] == "half_open"
+    # 探测进行中：并发请求不允许再进入
+    assert is_available("a", enabled=True, cooldown_s=30) is False
+    record_success("a", 10)
+    assert snapshot("a")["state"] == "closed"
+    assert is_available("a", enabled=True, cooldown_s=30) is True
+
+
+def test_save_sync_raises_when_lock_busy(mgr, tmp_path):
+    lock = mgr.path.with_suffix(".lock")
+    lock.write_text("999999")
+    try:
+        import pytest
+
+        with pytest.raises(RuntimeError):
+            mgr.save_sync()
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def test_save_sync_recovers_stale_lock(mgr):
+    import os
+    import time as _t
+
+    lock = mgr.path.with_suffix(".lock")
+    lock.write_text("0")
+    old = _t.time() - 60
+    os.utime(lock, (old, old))  # 陈旧锁：超过 10s 应被清理并正常写入
+    mgr.save_sync()
+    assert mgr.path.exists()
+    assert not lock.exists()
+
+
+def test_local_key_rejects_provider_keys(isolated_config):
+    isolated_config._config.server.local_api_key = "sk-local-real"
+    isolated_config._config.providers = [
+        ProviderConfig(id="p", base_url="https://example.com/v1", api_key="sk-upstream-123456", models=[ModelInfo(id="m")])
+    ]
+    with TestClient(app) as c:
+        r = c.post(
+            "/v1/chat/completions",
+            json={"model": "m", "messages": [{"role": "user", "content": "hi"}]},
+            headers={"Authorization": "Bearer sk-upstream-123456"},
+        )
+        assert r.status_code == 401

@@ -42,6 +42,7 @@ class BodySizeLimitMiddleware:
             await JSONResponse(detail, status_code=413)(scope, receive, send)
             return
         total = 0
+        response_started = False
 
         async def wrapped_receive() -> Message:
             nonlocal total
@@ -52,10 +53,18 @@ class BodySizeLimitMiddleware:
                     raise _BodyTooLarge()
             return msg
 
+        async def wrapped_send(msg: Message) -> None:
+            nonlocal response_started
+            if msg["type"] == "http.response.start":
+                response_started = True
+            await send(msg)
+
         try:
-            await self.app(scope, wrapped_receive, send)
+            await self.app(scope, wrapped_receive, wrapped_send)
         except _BodyTooLarge:
-            await JSONResponse(detail, status_code=413)(scope, receive, send)
+            if not response_started:
+                await JSONResponse(detail, status_code=413)(scope, receive, send)
+            # 响应已开始时无法再回 413，直接断开连接
 
 
 @asynccontextmanager

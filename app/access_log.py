@@ -14,6 +14,8 @@ _conn: sqlite3.Connection | None = None
 _path: Path | None = None
 
 DEFAULT_RETAIN = 5000
+_CLEANUP_INTERVAL = 500  # 每 N 次插入才做一次 COUNT/清理，避免每次请求全表计数
+_since_cleanup = 0
 
 
 def started_at() -> float:
@@ -115,17 +117,21 @@ def add(
         completion_tokens,
     )
     with _lock:
+        global _since_cleanup
         db = _db()
         db.execute(
             "INSERT INTO logs (ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
         db.commit()
-        cur = db.execute("SELECT COUNT(*) FROM logs")
-        n = int(cur.fetchone()[0])
-        if n > keep * 1.2:
-            db.execute("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)", (n - keep,))
-            db.commit()
+        _since_cleanup += 1
+        if _since_cleanup >= _CLEANUP_INTERVAL:
+            _since_cleanup = 0
+            cur = db.execute("SELECT COUNT(*) FROM logs")
+            n = int(cur.fetchone()[0])
+            if n > keep * 1.2:
+                db.execute("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)", (n - keep,))
+                db.commit()
 
 
 def list_logs(limit: int = 100, offset: int = 0) -> dict[str, Any]:

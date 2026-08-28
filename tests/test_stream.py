@@ -15,9 +15,29 @@ def test_parse_sse_variants():
 
 
 def test_split_sse_buffer_partial():
-    events, rest = split_sse_buffer(b'data: {"x":1}\n\ndata: {"x":')
+    events, rest = split_sse_buffer('data: {"x":1}\n\ndata: {"x":')
     assert len(events) == 1
-    assert b'{"x":' in rest
+    assert '{"x":' in rest
+
+
+def test_multibyte_utf8_split_across_chunks():
+    """中文等多字节字符被 TCP 分块切开时不应丢失/乱码。"""
+    payload = json.dumps({"choices": [{"delta": {"content": "你好世界，测试多字节字符边界。"}}]}, ensure_ascii=False)
+    encoded = ("data: " + payload + "\n\n").encode("utf-8")
+    cut = len(encoded) - 5  # 在最后一个多字节字符中间切开
+
+    async def raw():
+        yield encoded[:cut]
+        yield encoded[cut:]
+
+    async def collect():
+        out = []
+        async for c in to_chat_stream("chat_completions", raw(), "m"):
+            out.append(c.decode())
+        return "".join(out)
+
+    text = asyncio.run(collect())
+    assert "你好世界，测试多字节字符边界。" in text
 
 
 def test_extract_reasoning():

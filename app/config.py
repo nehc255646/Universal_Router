@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -167,16 +168,26 @@ class ConfigManager:
     def save_sync(self) -> None:
         # 原子写 + 简单文件锁（跨进程），Windows 用独占创建兼容
         lock = self.path.with_suffix(".lock")
+        acquired = False
         try:
-            # 尝试创建 lock 文件，超时 2s
-            import time as _t
             for _ in range(20):
                 try:
                     fd = lock.open("x")
+                    fd.write(str(os.getpid()))
                     fd.close()
+                    acquired = True
                     break
                 except FileExistsError:
-                    _t.sleep(0.1)
+                    # 陈旧锁（超过 10s）视为残留，清理后重试
+                    try:
+                        if time.time() - lock.stat().st_mtime > 10:
+                            lock.unlink()
+                            continue
+                    except OSError:
+                        pass
+                    time.sleep(0.1)
+            if not acquired:
+                raise RuntimeError("config.json.lock 被其他进程长期占用，放弃写入")
             tmp = self.path.with_suffix(".tmp")
             tmp.write_text(
                 json.dumps(self._config.model_dump(), ensure_ascii=False, indent=2),
@@ -184,12 +195,15 @@ class ConfigManager:
             )
             tmp.replace(self.path)
         finally:
-            try:
-                lock.unlink()
-            except Exception:
-                pass
-        # 明文密钥提醒
-        if any(p.api_key for p in self._config.providers):
+            if acquired:
+                try:
+                    lock.unlink()
+                except Exception:
+                    pass
+        # 明文密钥提醒（每进程只提示一次）
+        global _KEY_WARNED
+        if not _KEY_WARNED and any(p.api_key for p in self._config.providers):
+            _KEY_WARNED = True
             print("[config] 提醒: config.json 含明文 api_key，已被 .gitignore 忽略，请勿提交仓库")
 
     @property
@@ -209,6 +223,61 @@ class ConfigManager:
             self._config = new
             self.save_sync()
             return self._config
+
+    async def update_server(self, srv: ServerConfig) -> AppConfig:
+        """带锁更新 server 配置；保存失败时回滚内存。"""
+        async with self._lock:
+            prev = self._config.server
+            self._config.server = srv
+            try:
+                self.save_sync()
+            except Exception:
+                self._config.server = prev
+                raise
+            return self._config
+
+    async def add_provider(self, p: ProviderConfig) -> None:
+        """带锁新增 provider；id 冲突抛 ProviderExistsError。"""
+        async with self._lock:
+            if any(x.id == p.id for x in self._config.providers):
+                raise ProviderExistsError(f"provider id '{p.id}' 已存在")
+            self._config.providers.append(p)
+            try:
+                self.save_sync()
+            except Exception:
+                self._config.providers.pop()
+                raise
+
+    async def replace_provider(self, pid: str, p: ProviderConfig) -> bool:
+        """带锁替换 provider；不存在返回 False，id 冲突抛 ProviderExistsError。"""
+        async with self._lock:
+            idx = next((i for i, x in enumerate(self._config.providers) if x.id == pid), None)
+            if idx is None:
+                return False
+            if p.id != pid and any(x.id == p.id for x in self._config.providers):
+                raise ProviderExistsError(f"provider id '{p.id}' 已存在")
+            prev = self._config.providers[idx]
+            self._config.providers[idx] = p
+            try:
+                self.save_sync()
+            except Exception:
+                self._config.providers[idx] = prev
+                raise
+            return True
+
+    async def remove_provider(self, pid: str) -> bool:
+        """带锁删除 provider；不存在返回 False。"""
+        async with self._lock:
+            idx = next((i for i, x in enumerate(self._config.providers) if x.id == pid), None)
+            if idx is None:
+                return False
+            removed = self._config.providers.pop(idx)
+            try:
+                self.save_sync()
+            except Exception:
+                self._config.providers.insert(idx, removed)
+                raise
+            return True
 
     # provider CRUD
     def find_provider(self, pid: str) -> ProviderConfig | None:
@@ -268,6 +337,13 @@ class ConfigManager:
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+class ProviderExistsError(Exception):
+    pass
+
+
+_KEY_WARNED = False
 
 
 def is_loopback_bind(host: str | None) -> bool:

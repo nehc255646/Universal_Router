@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import time
 import uuid
@@ -15,6 +16,7 @@ from . import __version__, access_log
 from . import health as provider_health
 from .config import (
     ProviderConfig,
+    ProviderExistsError,
     apply_incoming_key,
     apply_incoming_server,
     config_manager,
@@ -58,6 +60,10 @@ def _admin_token(request: Request) -> str:
     return token
 
 
+def _token_eq(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
+
+
 async def require_admin(request: Request) -> None:
     """保护 /api/* 。绑定非本机时必须有 admin/local key；有 key 则一律校验。"""
     cfg = config_manager.config.server
@@ -68,7 +74,7 @@ async def require_admin(request: Request) -> None:
             raise HTTPException(403, "绑定非本机地址时必须设置 admin_api_key 或 local_api_key，以保护管理 API")
         return
     token = _admin_token(request)
-    if token != admin_key:
+    if not token or not _token_eq(token, admin_key):
         raise HTTPException(401, "管理 API 需要有效的 admin_api_key（Authorization 或 X-Admin-Key）")
 
 
@@ -130,8 +136,7 @@ async def update_config(body: dict[str, Any]):
         new_srv = ServerConfig.model_validate(srv)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
-    config_manager.config.server = new_srv
-    await config_manager.save()
+    await config_manager.update_server(new_srv)
     return {"server": server_public_dict(new_srv)}
 
 
@@ -147,39 +152,37 @@ async def create_provider(body: dict[str, Any]):
         p = ProviderConfig.model_validate(body)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
-    if config_manager.find_provider(p.id):
-        raise HTTPException(409, f"provider id '{p.id}' 已存在")
-    config_manager.config.providers.append(p)
-    await config_manager.save()
+    try:
+        await config_manager.add_provider(p)
+    except ProviderExistsError as e:
+        raise HTTPException(409, str(e)) from e
     return provider_public_dict(p)
 
 
 @manage_router.put("/providers/{pid}")
 async def update_provider(pid: str, body: dict[str, Any]):
-    idx = next((i for i, x in enumerate(config_manager.config.providers) if x.id == pid), None)
-    if idx is None:
+    existing = config_manager.find_provider(pid)
+    if existing is None:
         raise HTTPException(404, "provider not found")
-    existing = config_manager.config.providers[idx]
     body["id"] = body.get("id") or pid
     body = apply_incoming_key(body, existing)
     try:
         p = ProviderConfig.model_validate(body)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
-    if p.id != pid and config_manager.find_provider(p.id):
-        raise HTTPException(409, f"provider id '{p.id}' 已存在")
-    config_manager.config.providers[idx] = p
-    await config_manager.save()
+    try:
+        ok = await config_manager.replace_provider(pid, p)
+    except ProviderExistsError as e:
+        raise HTTPException(409, str(e)) from e
+    if not ok:
+        raise HTTPException(404, "provider not found")
     return provider_public_dict(p)
 
 
 @manage_router.delete("/providers/{pid}")
 async def delete_provider(pid: str):
-    idx = next((i for i, x in enumerate(config_manager.config.providers) if x.id == pid), None)
-    if idx is None:
+    if not await config_manager.remove_provider(pid):
         raise HTTPException(404, "provider not found")
-    config_manager.config.providers.pop(idx)
-    await config_manager.save()
     return {"ok": True}
 
 
@@ -254,9 +257,7 @@ def _auth_check(request: Request) -> None:
         token = (request.headers.get("x-api-key") or "").strip()
 
     if local_key:
-        if token == local_key:
-            return
-        if token and token in config_manager.all_api_keys():
+        if token and _token_eq(token, local_key):
             return
         raise HTTPException(401, "无效的 API Key（需匹配 server.local_api_key）")
 
@@ -265,7 +266,7 @@ def _auth_check(request: Request) -> None:
         return
     if not token:
         raise HTTPException(401, "缺少 Authorization: Bearer <API Key> 或 x-api-key")
-    if token in keys:
+    if any(_token_eq(token, k) for k in keys):
         return
     raise HTTPException(401, "无效的 API Key")
 
@@ -485,19 +486,21 @@ async def _post_with_disconnect_watch(
     return task.result()
 
 
+def _bad_request(inbound: str, error: str, message: str | None = None):
+    access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error=error)
+    return HTTPException(400, message or "invalid JSON body")
+
+
 async def _parse_proxy_request(inbound: str, request: Request) -> tuple[dict[str, Any], str, Any]:
     try:
         body = await request.json()
     except Exception:
-        access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="invalid JSON")
-        raise HTTPException(400, "invalid JSON body") from None
+        raise _bad_request(inbound, "invalid JSON") from None
     if not isinstance(body, dict):
-        access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="invalid JSON")
-        raise HTTPException(400, "invalid JSON body") from None
+        raise _bad_request(inbound, "invalid JSON")
     model = str(body.get("model") or "")
     if not model:
-        access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="missing model")
-        raise HTTPException(400, "model 字段必填")
+        raise _bad_request(inbound, "missing model", "model 字段必填")
     ir = _to_ir(inbound, body)
     return body, model, ir
 
@@ -656,10 +659,17 @@ def _proxy_stream(
 
                         stripped = _strip_provider_prefix(model, provider)
                         ms = int((time.perf_counter() - t0) * 1000)
-                        _record_ok(provider, ms, None)
-                        access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
-                        async for chunk in convert_stream(inbound, provider.upstream_mode, chained(), stripped):
+                        # 首块已到达；中途错误通过 error_sink 回传，流结束后统一记账
+                        sink: list[str] = []
+                        async for chunk in convert_stream(inbound, provider.upstream_mode, chained(), stripped, error_sink=sink):
                             yield chunk
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        if sink:
+                            _record_fail(provider.id, sink[0])
+                            access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=502, latency_ms=ms, error=sink[0][:200], attempts=attempts)
+                        else:
+                            _record_ok(provider, ms, None)
+                            access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
                         return
                     except StopAsyncIteration:
                         ms = int((time.perf_counter() - t0) * 1000)
@@ -715,7 +725,7 @@ def _proxy_stream(
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive", "X-Universal-Router-Provider": candidates[0].id},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
 
 

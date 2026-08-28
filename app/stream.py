@@ -1,6 +1,7 @@
 """跨协议 SSE 流转换。同协议透传；跨协议映射文本 / thinking / tool_calls / finish。"""
 from __future__ import annotations
 
+import codecs
 import json
 import time
 import uuid
@@ -15,7 +16,7 @@ def inbound_mode(inbound: str) -> str:
     return {"chat": "chat_completions", "responses": "responses", "messages": "messages"}.get(inbound, inbound)
 
 
-async def safe_upstream_stream(raw: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+async def safe_upstream_stream(raw: AsyncIterator[bytes], error_sink: list[str] | None = None) -> AsyncIterator[bytes]:
     try:
         async for chunk in raw:
             if chunk:
@@ -26,15 +27,19 @@ async def safe_upstream_stream(raw: AsyncIterator[bytes]) -> AsyncIterator[bytes
             err = json.loads(e.body.decode(errors="ignore")) if e.body else {"error": str(e)}
         except Exception:
             err = {"error": (e.body.decode(errors="ignore")[:2000] if e.body else str(e))}
+        if error_sink is not None:
+            error_sink.append(f"upstream {e.status_code}: {e.body.decode(errors='ignore')[:200] if e.body else e}")
         yield sse_format({"type": "error", "error": err, "status": e.status_code})
         yield b"data: [DONE]\n\n"
     except Exception as e:
+        if error_sink is not None:
+            error_sink.append(str(e))
         yield sse_format({"type": "error", "error": str(e)})
         yield b"data: [DONE]\n\n"
 
 
-def split_sse_buffer(buffer: bytes) -> tuple[list[str], bytes]:
-    text = buffer.decode(errors="ignore").replace("\r\n", "\n")
+def split_sse_buffer(buffer: str) -> tuple[list[str], str]:
+    text = buffer.replace("\r\n", "\n")
     parts = text.split("\n\n")
     remainder = parts.pop() if parts else ""
     events: list[str] = []
@@ -48,7 +53,7 @@ def split_sse_buffer(buffer: bytes) -> tuple[list[str], bytes]:
                 data_lines.append(s)
         if data_lines:
             events.append("\n".join(data_lines) if len(data_lines) > 1 else data_lines[0])
-    return events, remainder.encode(errors="ignore")
+    return events, remainder
 
 
 def _finish_from_anthropic(stop: str | None) -> str:
@@ -216,9 +221,11 @@ def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, 
 
 
 async def _iter_normalized(upstream_mode: str, raw: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    buffer = b""
+    # 增量解码：跨 chunk 拆开的多字节 UTF-8 序列不会损坏
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buffer = ""
     async for raw_chunk in raw:
-        buffer += raw_chunk
+        buffer += decoder.decode(raw_chunk)
         events, buffer = split_sse_buffer(buffer)
         for ev in events:
             data = parse_sse_line(ev)
@@ -226,8 +233,9 @@ async def _iter_normalized(upstream_mode: str, raw: AsyncIterator[bytes]) -> Asy
                 continue
             for item in _extract_events(data, upstream_mode):
                 yield item
+    buffer += decoder.decode(b"", final=True)
     if buffer.strip():
-        for line in buffer.decode(errors="ignore").split("\n"):
+        for line in buffer.replace("\r\n", "\n").split("\n"):
             data = parse_sse_line(line)
             if data is None:
                 continue
@@ -597,8 +605,14 @@ async def to_anthropic_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
     yield sse_format({"type": "message_stop"}, event="message_stop")
 
 
-async def convert_stream(inbound: str, upstream_mode: str, raw: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]:
-    raw = safe_upstream_stream(raw)
+async def convert_stream(
+    inbound: str,
+    upstream_mode: str,
+    raw: AsyncIterator[bytes],
+    model: str,
+    error_sink: list[str] | None = None,
+) -> AsyncIterator[bytes]:
+    raw = safe_upstream_stream(raw, error_sink)
     if inbound_mode(inbound) == upstream_mode:
         async for chunk in raw:
             yield chunk
