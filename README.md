@@ -29,17 +29,13 @@
 
 需要 Python 3.11+。
 
-Windows：
-
-```bat
-start.bat
-```
+Windows：双击 `start.bat` 启动网关，再用 `入口.url` 打开管理页。
 
 macOS / Linux：
 
 ```bash
-chmod +x start.sh
-./start.sh
+chmod +x 启动.sh
+./启动.sh
 ```
 
 或手动：

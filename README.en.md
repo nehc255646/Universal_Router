@@ -29,17 +29,13 @@ Client  --chat/responses/messages-->  Universal Router  --any upstream protocol-
 
 Python 3.11+ required.
 
-Windows:
-
-```bat
-start.bat
-```
+Windows: double-click `start.bat` to start the gateway, then open `入口.url` for the admin UI.
 
 macOS / Linux:
 
 ```bash
-chmod +x start.sh
-./start.sh
+chmod +x 启动.sh
+./启动.sh
 ```
 
 Or manually:

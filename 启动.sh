@@ -31,5 +31,4 @@ echo "[INFO] Gateway:  http://127.0.0.1:${PORT}/v1"
 echo "[INFO] Frontend: http://127.0.0.1:${PORT}/"
 echo "[INFO] Health:   http://127.0.0.1:${PORT}/health"
 echo "========================================"
-
 exec $PY -m uvicorn app.main:app --host 127.0.0.1 --port "${PORT}"
