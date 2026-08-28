@@ -3,13 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+CONFIG_PATH = Path(os.getenv("UR_CONFIG") or Path(__file__).resolve().parent.parent / "config.json")
 ID_RE = re.compile(r"^[a-z0-9\-_]+$")
 UPSTREAM_MODES = {"chat_completions", "responses", "messages"}
 
@@ -165,18 +166,50 @@ class ConfigManager:
         return {p.api_key for p in self._config.providers if p.api_key}
 
     def all_models(self) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
         for p in self._config.providers:
             for m in p.models:
-                out.append(
-                    {
-                        "id": m.id,
-                        "object": "model",
-                        "owned_by": p.id,
-                        "display_name": m.display_name or m.id,
-                    }
-                )
+                counts[m.id] = counts.get(m.id, 0) + 1
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for p in self._config.providers:
+            for m in p.models:
+                display = m.display_name or m.id
+                prefixed = f"{p.id}/{m.id}"
+                # 重名时仅暴露带前缀 id，避免客户端路由歧义
+                ids = [prefixed] if counts.get(m.id, 0) > 1 else [m.id, prefixed]
+                for mid in ids:
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    out.append(
+                        {
+                            "id": mid,
+                            "object": "model",
+                            "owned_by": p.id,
+                            "display_name": display,
+                        }
+                    )
         return out
+
+
+def provider_public_dict(p: ProviderConfig) -> dict[str, Any]:
+    d = p.model_dump()
+    d["has_api_key"] = bool(p.api_key)
+    d["api_key"] = ""
+    return d
+
+
+def apply_incoming_key(body: dict[str, Any], existing: ProviderConfig | None) -> dict[str, Any]:
+    """空密钥且未显式 clear_api_key 时保留原密钥，避免前端脱敏后覆盖。"""
+    body = dict(body)
+    if body.pop("clear_api_key", False):
+        body["api_key"] = ""
+        return body
+    incoming = (body.get("api_key") or "").strip()
+    if existing and (not incoming or incoming.strip("*") == ""):
+        body["api_key"] = existing.api_key
+    return body
 
 
 # 全局单例

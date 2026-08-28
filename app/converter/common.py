@@ -10,10 +10,10 @@ def parse_sse_line(line: str) -> dict[str, Any] | None:
     line = line.strip()
     if not line or line.startswith(":"):
         return None
-    if line == "data: [DONE]":
+    if line == "data: [DONE]" or line == "data:[DONE]":
         return {"__done": True}
-    if line.startswith("data: "):
-        payload = line[6:]
+    if line.startswith("data:"):
+        payload = line[5:].lstrip()
         if payload == "[DONE]":
             return {"__done": True}
         try:

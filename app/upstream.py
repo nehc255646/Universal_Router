@@ -1,12 +1,18 @@
 """上游转发 — httpx 封装"""
 from __future__ import annotations
 
-import json
 from typing import Any, AsyncIterator
 
 import httpx
 
 from .config import ProviderConfig
+
+
+class UpstreamHTTPError(Exception):
+    def __init__(self, status_code: int, body: bytes):
+        self.status_code = status_code
+        self.body = body
+        super().__init__(f"upstream {status_code}")
 
 
 def upstream_path_for(mode: str) -> str:
@@ -24,14 +30,20 @@ def build_headers(provider: ProviderConfig) -> dict[str, str]:
     if provider.api_key:
         h["Authorization"] = f"Bearer {provider.api_key}"
     for hdr in provider.headers:
-        h[hdr.name] = hdr.value
+        if hdr.name:
+            h[hdr.name] = hdr.value
     if provider.upstream_mode == "messages":
-        h["anthropic-version"] = "2023-06-01"
+        h.setdefault("anthropic-version", "2023-06-01")
         has_xkey = any(k.lower() == "x-api-key" for k in h)
         if has_xkey and "Authorization" in h:
-            # Anthropic 优先 x-api-key，移除 Bearer 避免上游校验冲突
             h.pop("Authorization", None)
+        if provider.api_key and not has_xkey:
+            h["x-api-key"] = provider.api_key
     return h
+
+
+def _url(provider: ProviderConfig, path: str) -> str:
+    return provider.base_url.rstrip("/") + path
 
 
 async def post_non_stream(
@@ -40,20 +52,13 @@ async def post_non_stream(
     body: dict[str, Any],
     timeout: float = 120,
 ) -> tuple[int, dict[str, Any] | bytes]:
-    url = provider.base_url.rstrip("/") + upstream_path_for(provider.upstream_mode)
+    url = _url(provider, upstream_path_for(provider.upstream_mode))
     headers = build_headers(provider)
-    # Anthropic 需 x-api-key 而非 Bearer
-    if provider.upstream_mode == "messages" and provider.api_key and "x-api-key" not in {k.lower(): v for k, v in headers.items()}:
-        # 如果用户未在 headers 配置 x-api-key，则将 api_key 同时设为 x-api-key
-        # 保留 Authorization 兼容部分中转
-        headers["x-api-key"] = provider.api_key
-
     resp = await client.post(url, json=body, headers=headers, timeout=timeout)
-    # 尝试解析 json
     try:
         data = resp.json()
     except Exception:
-        data = resp.content  # type: ignore
+        data = resp.content
     return resp.status_code, data
 
 
@@ -63,19 +68,46 @@ async def stream_upstream(
     body: dict[str, Any],
     timeout: float = 300,
 ) -> AsyncIterator[bytes]:
-    url = provider.base_url.rstrip("/") + upstream_path_for(provider.upstream_mode)
+    url = _url(provider, upstream_path_for(provider.upstream_mode))
     headers = build_headers(provider)
-    if provider.upstream_mode == "messages" and provider.api_key and "x-api-key" not in {k.lower(): v for k, v in headers.items()}:
-        headers["x-api-key"] = provider.api_key
     headers["Accept"] = "text/event-stream"
 
     async with client.stream("POST", url, json=body, headers=headers, timeout=timeout) as resp:
-        # 流式错误透传：上游非 2xx 时直接抛出，由 _handle_proxy 统一转为 JSON 错误
         if resp.status_code >= 400:
-            # 尽力读取错误体，避免挂死
             err_body = await resp.aread()
-            # 抛出带状态码的异常，上层捕获
-            raise httpx.HTTPStatusError(f"upstream {resp.status_code}", request=resp.request, response=resp)
+            raise UpstreamHTTPError(resp.status_code, err_body)
         async for chunk in resp.aiter_bytes():
             if chunk:
                 yield chunk
+
+
+async def fetch_upstream_models(
+    client: httpx.AsyncClient,
+    provider: ProviderConfig,
+    timeout: float = 20,
+) -> tuple[int, list[dict[str, Any]] | dict[str, Any] | str]:
+    url = _url(provider, "/models")
+    headers = build_headers(provider)
+    headers.pop("Content-Type", None)
+    resp = await client.get(url, headers=headers, timeout=timeout)
+    try:
+        data = resp.json()
+    except Exception:
+        return resp.status_code, resp.text[:2000]
+    if resp.status_code >= 400:
+        return resp.status_code, data if isinstance(data, dict) else {"error": str(data)}
+    models: list[dict[str, Any]] = []
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        for item in data["data"]:
+            if not isinstance(item, dict):
+                continue
+            mid = item.get("id") or item.get("name")
+            if mid:
+                models.append({"id": str(mid), "display_name": str(item.get("display_name") or item.get("name") or mid)})
+    elif isinstance(data, list):
+        for item in data:
+            if isinstance(item, str):
+                models.append({"id": item, "display_name": item})
+            elif isinstance(item, dict) and item.get("id"):
+                models.append({"id": str(item["id"]), "display_name": str(item.get("display_name") or item["id"])})
+    return resp.status_code, models

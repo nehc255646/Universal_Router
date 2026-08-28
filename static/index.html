@@ -35,7 +35,7 @@ tailwind.config={
     <div class="flex items-center gap-4">
       <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 via-indigo-600 to-violet-700 flex items-center justify-center font-bold text-sm tracking-widest shadow-lg shadow-violet-600/20 ring-1 ring-white/10">UR</div>
       <div class="leading-tight">
-        <div class="font-semibold text-[15px] tracking-tight flex items-center gap-2">Universal Router <span class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20">v0.1</span></div>
+        <div class="font-semibold text-[15px] tracking-tight flex items-center gap-2">Universal Router <span class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20">v0.2</span></div>
         <div class="text-[12px] text-zinc-400 hidden sm:block">三协议互转 · 本地网关 · 零延迟</div>
       </div>
       <div class="hidden lg:flex items-center gap-2 ml-6 pl-6 border-l border-zinc-800/60">
@@ -56,7 +56,7 @@ tailwind.config={
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-zinc-400"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v3"/></svg>
         </button>
       </div>
-      <a href="https://github.com" target="_blank" class="hidden sm:flex w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 items-center justify-center hover:border-zinc-700 transition text-zinc-500 hover:text-zinc-300">
+      <a href="https://github.com/nehc255646/Universal_Router" target="_blank" class="hidden sm:flex w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 items-center justify-center hover:border-zinc-700 transition text-zinc-500 hover:text-zinc-300">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577v-2.165c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.73.083-.73 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.108-.775.418-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.468-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.63-5.37-12-12-12z"/></svg>
       </a>
     </div>
@@ -144,8 +144,89 @@ tailwind.config={
 
   <!-- 右侧主面板 -->
   <main class="rounded-2xl bg-zinc-900/50 backdrop-blur border border-zinc-800/80 overflow-hidden min-h-[620px] flex flex-col">
+    <div class="px-4 sm:px-6 pt-4 flex items-center gap-1 border-b border-zinc-800/60 bg-zinc-950/20">
+      <template x-for="t in [{id:'config',label:'配置'},{id:'play',label:'试聊'},{id:'connect',label:'接入'},{id:'logs',label:'日志'}]" :key="t.id">
+        <button @click="tab=t.id; if(t.id==='logs') loadLogs()" class="px-3 py-2.5 text-sm font-medium border-b-2 -mb-px transition" :class="tab===t.id ? 'border-violet-500 text-zinc-100' : 'border-transparent text-zinc-500 hover:text-zinc-300'" x-text="t.label"></button>
+      </template>
+    </div>
+
+    <div x-show="tab==='play'" class="flex-1 p-6 space-y-4 overflow-auto custom-scroll" x-cloak>
+      <div class="grid grid-cols-1 md:grid-cols-[1fr_140px_110px] gap-3">
+        <label class="block">
+          <span class="text-xs font-medium text-zinc-400">模型</span>
+          <select x-model="play.model" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm">
+            <option value="">选择模型</option>
+            <template x-for="m in allModels()" :key="m.prefixed">
+              <option :value="m.prefixed" x-text="m.label"></option>
+            </template>
+          </select>
+        </label>
+        <label class="block">
+          <span class="text-xs font-medium text-zinc-400">入站协议</span>
+          <select x-model="play.protocol" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm">
+            <option value="chat">chat</option>
+            <option value="responses">responses</option>
+            <option value="messages">messages</option>
+          </select>
+        </label>
+        <label class="flex items-end gap-2 pb-2">
+          <input type="checkbox" x-model="play.stream" class="rounded border-zinc-700 bg-zinc-900" />
+          <span class="text-sm text-zinc-300">流式</span>
+        </label>
+      </div>
+      <input x-model="play.system" placeholder="System prompt（可选）" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm" />
+      <textarea x-model="play.prompt" rows="4" placeholder="输入一条消息，验证协议转换是否正常…" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm resize-y"></textarea>
+      <button @click="sendPlay()" :disabled="play.loading" class="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-sm font-medium">
+        <span x-text="play.loading ? '生成中…' : '发送'"></span>
+      </button>
+      <div x-show="play.error" class="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs font-mono text-red-200 whitespace-pre-wrap" x-text="play.error"></div>
+      <div class="rounded-xl border border-zinc-800 bg-zinc-950 min-h-[160px] p-4 text-sm leading-relaxed whitespace-pre-wrap" x-text="play.output || '回复将显示在这里'"></div>
+    </div>
+
+    <div x-show="tab==='connect'" class="flex-1 p-6 space-y-4 overflow-auto custom-scroll" x-cloak>
+      <p class="text-sm text-zinc-400">把任意客户端的 Base URL 指到本网关，协议由入站路径决定，上游由 model 路由。</p>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3 text-sm">
+        <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800"><div class="text-sky-300 text-xs font-medium">Chat Completions</div><div class="font-mono text-[11px] text-zinc-500 mt-1" x-text="gatewayUrl + '/chat/completions'"></div></div>
+        <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800"><div class="text-emerald-300 text-xs font-medium">Responses</div><div class="font-mono text-[11px] text-zinc-500 mt-1" x-text="gatewayUrl + '/responses'"></div></div>
+        <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800"><div class="text-amber-300 text-xs font-medium">Messages</div><div class="font-mono text-[11px] text-zinc-500 mt-1" x-text="gatewayUrl + '/messages'"></div></div>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-2"><span class="text-xs font-medium text-zinc-400">curl</span><button @click="copy(curlSnippet())" class="text-xs text-violet-300">复制</button></div>
+        <pre class="p-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-zinc-300 overflow-auto custom-scroll" x-text="curlSnippet()"></pre>
+      </div>
+      <div>
+        <div class="flex items-center justify-between mb-2"><span class="text-xs font-medium text-zinc-400">Python openai SDK</span><button @click="copy(pythonSnippet())" class="text-xs text-violet-300">复制</button></div>
+        <pre class="p-3 rounded-xl bg-zinc-950 border border-zinc-800 text-xs font-mono text-zinc-300 overflow-auto custom-scroll" x-text="pythonSnippet()"></pre>
+      </div>
+    </div>
+
+    <div x-show="tab==='logs'" class="flex-1 p-6 overflow-auto custom-scroll" x-cloak>
+      <div class="flex items-center justify-between mb-3">
+        <span class="text-sm font-medium">最近请求</span>
+        <div class="flex gap-2">
+          <button @click="loadLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">刷新</button>
+          <button @click="clearLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">清空</button>
+        </div>
+      </div>
+      <div x-show="!logs.length" class="text-sm text-zinc-500 text-center py-10">暂无请求记录</div>
+      <div class="space-y-2">
+        <template x-for="(e,i) in logs" :key="i">
+          <div class="flex flex-wrap items-center gap-2 text-xs p-3 rounded-xl border border-zinc-800 bg-zinc-950/50">
+            <span class="text-zinc-500 font-mono" x-text="fmtTime(e.ts)"></span>
+            <span class="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300" x-text="e.inbound"></span>
+            <span class="font-mono text-zinc-300 truncate max-w-[220px]" x-text="e.model"></span>
+            <span class="text-zinc-500" x-text="e.provider_id || '-'"></span>
+            <span :class="e.status<400 ? 'text-emerald-300' : 'text-red-300'" x-text="e.status"></span>
+            <span class="text-zinc-500" x-text="e.latency_ms + 'ms'"></span>
+            <span x-show="e.stream" class="text-violet-300">stream</span>
+            <span x-show="e.error" class="text-red-300/80 truncate max-w-[280px]" x-text="e.error"></span>
+          </div>
+        </template>
+      </div>
+    </div>
+
     <!-- 空状态 -->
-    <template x-if="!selected">
+    <template x-if="tab==='config' && !selected">
       <div class="flex-1 flex flex-col items-center justify-center p-8 lg:p-12 text-center">
         <div class="w-20 h-20 rounded-3xl bg-gradient-to-br from-violet-600/20 to-indigo-600/20 border border-violet-500/20 flex items-center justify-center mb-6">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
@@ -170,7 +251,7 @@ tailwind.config={
       </div>
     </template>
 
-    <template x-if="selected">
+    <template x-if="tab==='config' && selected">
       <div class="flex-1 flex flex-col">
         <!-- 顶栏 -->
         <div class="px-6 py-4 border-b border-zinc-800/60 flex items-center justify-between gap-4 bg-zinc-950/30">
@@ -195,6 +276,11 @@ tailwind.config={
             <label class="block group">
               <span class="text-xs font-medium text-zinc-300 flex items-center gap-1">提供商 ID <span class="text-red-400">*</span> <span class="ml-auto text-[11px] font-normal text-zinc-500 hidden group-focus-within:block">a-z 0-9 - _</span></span>
               <input x-model="form.id" placeholder="my-provider" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+              <div class="flex flex-wrap gap-1.5 mt-2">
+                <template x-for="pr in presets" :key="pr.id">
+                  <button type="button" @click="applyPreset(pr)" class="text-[11px] px-2 py-1 rounded-full bg-zinc-800 hover:bg-zinc-700 text-zinc-300" x-text="pr.display_name"></button>
+                </template>
+              </div>
             </label>
             <label class="block">
               <span class="text-xs font-medium text-zinc-300">显示名称</span>
@@ -220,7 +306,8 @@ tailwind.config={
                 </div>
                 <button @click="showKey=!showKey" class="px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition" x-text="showKey ? '隐藏' : '显示'"></button>
               </div>
-              <span class="text-[11px] text-zinc-500 mt-1 block">留空则使用下方自定义请求头进行鉴权</span>
+              <span class="text-[11px] text-zinc-500 mt-1 block" x-text="form.has_api_key ? '已保存密钥 · 留空则不修改' : '留空则使用下方自定义请求头进行鉴权'"></span>
+              <button x-show="form.has_api_key" type="button" @click="clearKey()" class="text-[11px] text-red-300/80 hover:text-red-300 mt-1">清除已保存密钥</button>
             </label>
             <label class="block">
               <span class="text-xs font-medium text-zinc-300">上游接口</span>
@@ -240,7 +327,10 @@ tailwind.config={
                 <span class="text-sm font-medium">模型</span>
                 <span class="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400" x-text="form.models.length"></span>
               </div>
-              <button @click="form.models.push({id:'',display_name:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加模型</button>
+              <div class="flex gap-2">
+                <button @click="fetchModels()" :disabled="fetchingModels" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-xs font-medium transition" x-text="fetchingModels ? '拉取中…' : '从上游拉取'"></button>
+                <button @click="form.models.push({id:'',display_name:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加模型</button>
+              </div>
             </div>
             <div class="p-3 space-y-2">
               <template x-for="(m, idx) in form.models" :key="idx">

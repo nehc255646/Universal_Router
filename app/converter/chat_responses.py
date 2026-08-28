@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall
 from .common import extract_text
+from .extras import CHAT_PASSTHROUGH, RESPONSES_PASSTHROUGH, take_extras
 
 # ---------- helpers ----------
 
@@ -121,7 +122,7 @@ def ir_to_chat(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
         body["top_p"] = ir.top_p
     if ir.stop is not None:
         body["stop"] = ir.stop
-    body.update(ir.extra)
+    body.update(take_extras(ir.extra, CHAT_PASSTHROUGH))
     return body
 
 
@@ -133,6 +134,8 @@ def ir_response_to_chat(ir_resp: IRResponse) -> dict[str, Any]:
         msg["content"] = ir_resp.content or ""
     if ir_resp.tool_calls:
         msg["tool_calls"] = [{"id": tc.id, "type": "function", "function": {"name": tc.name, "arguments": tc.arguments}} for tc in ir_resp.tool_calls]
+    if ir_resp.reasoning:
+        msg["reasoning_content"] = ir_resp.reasoning
     return {
         "id": ir_resp.id,
         "object": "chat.completion",
@@ -278,7 +281,7 @@ def ir_to_responses(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
         body["max_output_tokens"] = ir.max_tokens
     if ir.top_p is not None:
         body["top_p"] = ir.top_p
-    body.update(ir.extra)
+    body.update(take_extras(ir.extra, RESPONSES_PASSTHROUGH))
     return body
 
 

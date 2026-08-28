@@ -7,8 +7,32 @@ from typing import Any
 
 from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall
 from .common import extract_text
+from .extras import ANTHROPIC_PASSTHROUGH, take_extras
 
 ANTHROPIC_VERSION = "2023-06-01"
+
+
+def _as_content_blocks(content: Any) -> list[dict[str, Any]]:
+    if content is None:
+        return []
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}] if content else []
+    if isinstance(content, list):
+        return [c for c in content if isinstance(c, dict)]
+    return [{"type": "text", "text": str(content)}]
+
+
+def _merge_consecutive_roles(msgs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Anthropic 不允许连续相同 role，合并相邻 user/assistant。"""
+    out: list[dict[str, Any]] = []
+    for m in msgs:
+        if out and out[-1].get("role") == m.get("role"):
+            a = _as_content_blocks(out[-1].get("content"))
+            b = _as_content_blocks(m.get("content"))
+            out[-1]["content"] = a + b
+        else:
+            out.append(m)
+    return out
 
 
 def _content_to_ir_anthropic(content: Any) -> str | list[IRContent]:
@@ -204,6 +228,8 @@ def ir_to_anthropic(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
                 content = ""
         msgs.append({"role": m.role, "content": content})
 
+    msgs = _merge_consecutive_roles(msgs)
+
     # 规范化 tool_choice：OpenAI -> Anthropic
     def _to_anthropic_tc(tc: Any) -> Any:
         if tc is None:
@@ -214,7 +240,7 @@ def ir_to_anthropic(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
             if tc == "required":
                 return {"type": "any"}
             if tc == "none":
-                return {"type": "auto", "disable_parallel_tool_use": True}  # 近似
+                return {"type": "none"}
             return {"type": "auto"}
         if isinstance(tc, dict):
             # {"type":"function","function":{"name":...}}
@@ -236,13 +262,13 @@ def ir_to_anthropic(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
         body["stream"] = True
     if ir.temperature is not None:
         body["temperature"] = ir.temperature
-    if ir.max_tokens is not None:
-        body["max_tokens"] = ir.max_tokens
+    # Anthropic 要求 max_tokens
+    body["max_tokens"] = ir.max_tokens if ir.max_tokens is not None else 4096
     if ir.top_p is not None:
         body["top_p"] = ir.top_p
     if ir.stop is not None:
         body["stop_sequences"] = ir.stop if isinstance(ir.stop, list) else [ir.stop]
-    body.update(ir.extra)
+    body.update(take_extras(ir.extra, ANTHROPIC_PASSTHROUGH))
     return body
 
 

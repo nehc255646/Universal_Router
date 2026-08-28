@@ -33,8 +33,13 @@ if errorlevel 1 (
 )
 
 if not exist "config.json" (
-    echo {"server": {"host": "127.0.0.1", "port": 8787, "local_api_key": ""}, "providers": []} > config.json
-    echo [INFO] Created default config.json
+    if exist "config.example.json" (
+        copy /y "config.example.json" "config.json" >nul
+        echo [INFO] Created config.json from example — edit API keys
+    ) else (
+        echo {"server": {"host": "127.0.0.1", "port": 8787, "local_api_key": ""}, "providers": []} > config.json
+        echo [INFO] Created default config.json
+    )
 )
 
 set PORT=8787

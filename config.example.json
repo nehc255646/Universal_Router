@@ -1,0 +1,20 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 8787,
+    "local_api_key": ""
+  },
+  "providers": [
+    {
+      "id": "openai",
+      "display_name": "OpenAI",
+      "base_url": "https://api.openai.com/v1",
+      "api_key": "sk-your-key",
+      "upstream_mode": "chat_completions",
+      "models": [
+        { "id": "gpt-4o", "display_name": "GPT-4o" }
+      ],
+      "headers": []
+    }
+  ]
+}

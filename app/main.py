@@ -11,35 +11,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import __version__
 from .config import config_manager
 from .server import manage_router, proxy_router
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.httpx_client = httpx.AsyncClient(timeout=httpx.Timeout(120, read=300))
+    app.state.httpx_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=15, read=300, write=60, pool=15),
+        follow_redirects=True,
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+    )
     yield
     await app.state.httpx_client.aclose()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Universal Router", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="Universal Router",
+        version=__version__,
+        description="本地三协议互转网关：OpenAI Chat Completions / Responses / Anthropic Messages",
+        lifespan=lifespan,
+    )
 
-    # 本地网关无需宽 CORS，仅放行本地前端；如需跨域请显式配置环境变量
-    allowed_origins = os.getenv("UR_CORS_ORIGINS", "").split(",") if os.getenv("UR_CORS_ORIGINS") else []
-    if allowed_origins and allowed_origins != [""]:
+    allowed_origins = [o.strip() for o in os.getenv("UR_CORS_ORIGINS", "").split(",") if o.strip()]
+    if allowed_origins:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=[o.strip() for o in allowed_origins if o.strip()],
+            allow_origins=allowed_origins,
             allow_methods=["*"],
             allow_headers=["*"],
         )
 
     @app.get("/health")
     async def health():
-        return {"ok": True}
+        cfg = config_manager.config
+        return {
+            "ok": True,
+            "version": __version__,
+            "providers": len(cfg.providers),
+        }
 
-    # 限制请求体 4MB，防 OOM；可在环境变量 UR_MAX_BODY 覆盖
     max_body = int(os.getenv("UR_MAX_BODY", str(4 * 1024 * 1024)))
 
     @app.middleware("http")
@@ -52,11 +65,8 @@ def create_app() -> FastAPI:
     app.include_router(manage_router)
     app.include_router(proxy_router)
 
-    # 静态前端挂载在 / 需放在 API 之后，且 html=True 会吞 404，故加校验：仅挂载文件存在时
-    # 使用 mount 但 FastAPI 会优先匹配已注册路由，故安全；为防 SPA 劫持 /v1 404，显式保留 404 透传
     static_dir = Path(__file__).resolve().parent.parent / "static"
     if static_dir.exists():
-        # 仅在非 API/非 health 路径回落到 index.html，404 仍由 FastAPI 正常返回
         app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
 
     return app
