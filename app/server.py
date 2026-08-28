@@ -1,6 +1,7 @@
 """管理 API + 代理 API"""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 import uuid
@@ -10,8 +11,9 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import access_log
+from . import __version__, access_log
 from .config import ProviderConfig, apply_incoming_key, config_manager, provider_public_dict
+from .router import is_retryable_status, resolve_providers
 from .converter.chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
 from .converter.chat_responses import (
     chat_to_ir,
@@ -23,7 +25,7 @@ from .converter.chat_responses import (
 )
 from .ir import IRResponse, IRToolCall
 from .stream import convert_stream
-from .upstream import fetch_upstream_models, post_non_stream, stream_upstream
+from .upstream import UpstreamHTTPError, fetch_upstream_models, post_non_stream, stream_upstream
 
 manage_router = APIRouter(prefix="/api")
 proxy_router = APIRouter(prefix="/v1")
@@ -35,7 +37,7 @@ async def api_status():
     cfg = config_manager.config
     return {
         "ok": True,
-        "version": "0.2.0",
+        "version": __version__,
         "uptime_s": int(time.time() - STARTED),
         "host": cfg.server.host,
         "port": cfg.server.port,
@@ -164,8 +166,8 @@ async def fetch_models(pid: str, request: Request):
 
 
 @manage_router.get("/logs")
-async def get_logs():
-    return access_log.list_logs()
+async def get_logs(limit: int = 100, offset: int = 0):
+    return access_log.list_logs(limit=limit, offset=offset)
 
 
 @manage_router.delete("/logs")
@@ -201,12 +203,10 @@ def _auth_check(request: Request) -> None:
 
 
 def _resolve_provider(model: str) -> ProviderConfig:
-    p = config_manager.find_provider_by_model(model)
-    if not p:
-        if len(config_manager.config.providers) == 1:
-            return config_manager.config.providers[0]
+    found = resolve_providers(model)
+    if not found:
         raise HTTPException(400, f"未知 model '{model}'，请先在管理页配置提供商与模型")
-    return p
+    return found[0]
 
 
 def _strip_provider_prefix(model: str, provider: ProviderConfig) -> str:
@@ -395,45 +395,146 @@ async def _handle_proxy(inbound: str, request: Request):
     if not model:
         access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="missing model")
         raise HTTPException(400, "model 字段必填")
-    provider = _resolve_provider(model)
-    provider_id = provider.id
+    candidates = resolve_providers(model)
+    if not candidates:
+        access_log.add(inbound=inbound, model=model, provider_id=None, stream=False, status=400, latency_ms=0, error="unknown model")
+        raise HTTPException(400, f"未知 model '{model}'，请先在管理页配置提供商与模型")
     ir = _to_ir(inbound, body)
     stream = bool(body.get("stream"))
-    upstream_body = _from_ir_to_upstream(ir, provider, stream=stream)
     client: httpx.AsyncClient = request.app.state.httpx_client
-    stripped = _strip_provider_prefix(model, provider)
+    server = config_manager.config.server
+    backoff = max(0, int(server.retry_backoff_ms)) / 1000.0
+    extra_tries = int(server.retry_count)
+
+    def _can_retry(pi: int, attempt: int, n_tries: int, retryable: bool) -> bool:
+        if not retryable:
+            return False
+        if attempt < n_tries - 1:
+            return True
+        return bool(server.failover and pi < len(candidates) - 1)
 
     if not stream:
-        try:
-            status, data = await post_non_stream(client, provider, upstream_body)
-        except Exception as e:
-            ms = int((time.perf_counter() - t0) * 1000)
-            access_log.add(inbound=inbound, model=model, provider_id=provider_id, stream=False, status=502, latency_ms=ms, error=str(e))
-            return JSONResponse(content={"error": {"message": str(e), "type": "upstream_error"}}, status_code=502)
+        last_status = 502
+        last_payload: Any = {"error": {"message": "all upstreams failed", "type": "upstream_error"}}
+        last_pid = candidates[0].id
+        attempts = 0
+        for pi, provider in enumerate(candidates):
+            upstream_body = _from_ir_to_upstream(ir, provider, stream=False)
+            n_tries = 1 + extra_tries
+            for attempt in range(n_tries):
+                attempts += 1
+                last_pid = provider.id
+                try:
+                    status, data = await post_non_stream(client, provider, upstream_body, timeout=provider.timeout_s)
+                except Exception as e:
+                    last_status = 502
+                    last_payload = {"error": {"message": str(e), "type": "upstream_error"}}
+                    if _can_retry(pi, attempt, n_tries, True):
+                        if backoff:
+                            await asyncio.sleep(backoff)
+                        continue
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=502, latency_ms=ms, error=str(e), attempts=attempts)
+                    return JSONResponse(content=last_payload, status_code=502, headers={"X-Universal-Router-Provider": last_pid})
+                if isinstance(data, bytes):
+                    text = data.decode(errors="ignore")
+                    last_status = status if status >= 400 else 502
+                    last_payload = {"error": text[:2000] if status >= 400 else f"upstream 非 JSON: {text[:500]}"}
+                    retryable = is_retryable_status(status) or status >= 500
+                    if _can_retry(pi, attempt, n_tries, retryable):
+                        if backoff:
+                            await asyncio.sleep(backoff)
+                        continue
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error=text[:200], attempts=attempts)
+                    return JSONResponse(content=last_payload, status_code=last_status)
+                if 200 <= status < 300:
+                    stripped = _strip_provider_prefix(model, provider)
+                    result = _upstream_resp_to_inbound(inbound, provider.upstream_mode, data, stripped)
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=False, status=200, latency_ms=ms, attempts=attempts)
+                    return JSONResponse(content=result, headers={"X-Universal-Router-Provider": provider.id})
+                last_status = status
+                last_payload = data if isinstance(data, dict) else {"error": str(data)}
+                if _can_retry(pi, attempt, n_tries, is_retryable_status(status)):
+                    if backoff:
+                        await asyncio.sleep(backoff)
+                    continue
+                ms = int((time.perf_counter() - t0) * 1000)
+                access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=status, latency_ms=ms, error=str(data)[:200], attempts=attempts)
+                return JSONResponse(content=last_payload, status_code=status, headers={"X-Universal-Router-Provider": last_pid})
         ms = int((time.perf_counter() - t0) * 1000)
-        if isinstance(data, bytes):
-            text = data.decode(errors="ignore")
-            access_log.add(inbound=inbound, model=model, provider_id=provider_id, stream=False, status=status if status >= 400 else 502, latency_ms=ms, error=text[:200])
-            if status >= 400:
-                return JSONResponse(content={"error": text[:2000]}, status_code=status)
-            return JSONResponse(content={"error": f"upstream 非 JSON: {text[:500]}"}, status_code=502)
-        if status >= 400:
-            access_log.add(inbound=inbound, model=model, provider_id=provider_id, stream=False, status=status, latency_ms=ms, error=str(data)[:200])
-            return JSONResponse(content=data if isinstance(data, dict) else {"error": str(data)}, status_code=status)
-        result = _upstream_resp_to_inbound(inbound, provider.upstream_mode, data, stripped)
-        access_log.add(inbound=inbound, model=model, provider_id=provider_id, stream=False, status=200, latency_ms=ms)
-        return JSONResponse(content=result)
-
-    access_log.add(inbound=inbound, model=model, provider_id=provider_id, stream=True, status=200, latency_ms=int((time.perf_counter() - t0) * 1000))
+        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error="exhausted retries", attempts=attempts)
+        return JSONResponse(content=last_payload, status_code=last_status, headers={"X-Universal-Router-Provider": last_pid})
 
     async def gen():
-        async for chunk in convert_stream(inbound, provider.upstream_mode, stream_upstream(client, provider, upstream_body), stripped):
-            yield chunk
+        attempts = 0
+        last_err = "all upstreams failed"
+        last_pid = candidates[0].id
+        for pi, provider in enumerate(candidates):
+            upstream_body = _from_ir_to_upstream(ir, provider, stream=True)
+            n_tries = 1 + extra_tries
+            for attempt in range(n_tries):
+                attempts += 1
+                last_pid = provider.id
+                try:
+                    raw = stream_upstream(client, provider, upstream_body, timeout=max(provider.timeout_s, 60))
+                    it = raw.__aiter__()
+                    first = await it.__anext__()
+
+                    async def chained(first_chunk=first, iterator=it):
+                        yield first_chunk
+                        async for c in iterator:
+                            yield c
+
+                    stripped = _strip_provider_prefix(model, provider)
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
+                    async for chunk in convert_stream(inbound, provider.upstream_mode, chained(), stripped):
+                        yield chunk
+                    return
+                except StopAsyncIteration:
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
+                    return
+                except UpstreamHTTPError as e:
+                    last_err = e.body.decode(errors="ignore")[:500] if e.body else str(e)
+                    retryable = is_retryable_status(e.status_code)
+                    if _can_retry(pi, attempt, n_tries, retryable):
+                        if backoff:
+                            await asyncio.sleep(backoff)
+                        continue
+                    from .converter.common import sse_format
+
+                    yield sse_format({"type": "error", "error": last_err, "status": e.status_code})
+                    yield b"data: [DONE]\n\n"
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=e.status_code, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                    return
+                except Exception as e:
+                    last_err = str(e)
+                    if _can_retry(pi, attempt, n_tries, True):
+                        if backoff:
+                            await asyncio.sleep(backoff)
+                        continue
+                    from .converter.common import sse_format
+
+                    yield sse_format({"type": "error", "error": last_err})
+                    yield b"data: [DONE]\n\n"
+                    ms = int((time.perf_counter() - t0) * 1000)
+                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                    return
+        from .converter.common import sse_format
+
+        yield sse_format({"type": "error", "error": last_err})
+        yield b"data: [DONE]\n\n"
+        ms = int((time.perf_counter() - t0) * 1000)
+        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
 
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive", "X-Universal-Router-Provider": candidates[0].id},
     )
 
 

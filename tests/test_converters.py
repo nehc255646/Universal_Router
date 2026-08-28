@@ -113,6 +113,18 @@ def test_responses_function_call_history():
     assert "function_call" in types and "function_call_output" in types
 
 
+def test_ir_response_reasoning_mapped():
+    ir = IRResponse(model="m", content="hello", reasoning="step 1")
+    chat = ir_response_to_chat(ir)
+    assert chat["choices"][0]["message"]["reasoning_content"] == "step 1"
+    anth = ir_response_to_anthropic(ir)
+    assert anth["content"][0]["type"] == "thinking"
+    from app.converter.chat_responses import ir_response_to_responses
+
+    resp = ir_response_to_responses(ir)
+    assert resp["output"][0]["type"] == "reasoning"
+
+
 def test_ir_response_to_chat_and_anthropic():
     ir = IRResponse(
         model="m",

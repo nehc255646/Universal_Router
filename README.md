@@ -6,14 +6,15 @@
 
 - 仓库：https://github.com/nehc255646/Universal_Router
 - 默认监听：`127.0.0.1:8787`
-- 版本：0.2.0 · MIT
+- 版本：0.3.0 · MIT
 
 ## 功能
 
 - 入站 `/v1/chat/completions` · `/v1/responses` · `/v1/messages`
 - 上游 `chat_completions` / `responses` / `messages`，按提供商配置
-- 经 IR 中间表示互转：文本、多模态图片、function/tool_calls（含流式文本与工具增量）
-- Web 管理页：提供商 CRUD、预设、拉取模型、连通测试、试聊、请求日志、curl/Python 示例
+- 经 IR 中间表示互转：文本、thinking/reasoning、多模态图片、function/tool_calls（含流式）
+- 多提供商：优先级 / 轮询 / 加权，失败重试与 failover
+- Web 管理页：提供商 CRUD、预设、拉取模型、连通测试、试聊、持久化请求日志
 - 可选本地鉴权；管理 API 返回时脱敏 `api_key`
 - 模型路由支持 `model` 或 `provider/model`
 
@@ -90,7 +91,11 @@ curl http://127.0.0.1:8787/v1/messages \
 |---|---|
 | `server.host` / `server.port` | 监听地址，改完需重启 |
 | `server.local_api_key` | 非空则入站必须 `Authorization: Bearer` 或 `x-api-key` 匹配 |
+| `server.route_strategy` | `priority` / `round_robin` / `weighted` |
+| `server.retry_count` | 同一提供商额外重试次数 |
+| `server.failover` | 失败后尝试下一个匹配提供商 |
 | `providers[].id` | `a-z0-9-_`，用于 `provider/model` 前缀 |
+| `providers[].enabled` / `priority` / `weight` | 停用、越小越优先、同优先级权重 |
 | `providers[].base_url` | 含 `/v1` 的上游根路径 |
 | `providers[].upstream_mode` | `chat_completions` / `responses` / `messages` |
 | `providers[].models` | 用于路由；可用管理页「从上游拉取」 |
@@ -106,6 +111,7 @@ curl http://127.0.0.1:8787/v1/messages \
 | 变量 | 说明 |
 |---|---|
 | `UR_CONFIG` | 配置文件路径 |
+| `UR_LOG_DB` | SQLite 日志路径，默认 `data/access.db` |
 | `UR_CORS_ORIGINS` | 逗号分隔的 CORS 来源 |
 | `UR_MAX_BODY` | 请求体上限，默认 4MB |
 
@@ -127,7 +133,8 @@ config.example.json
 
 ## 说明与限制
 
-- 同协议默认 SSE 透传；跨协议会重写事件流（文本 + tool_calls + finish）
+- 同协议默认 SSE 透传；跨协议会重写事件流（文本 + thinking + tool_calls + finish）
+- 可重试状态码：408 / 409 / 429 / 500 / 502 / 503 / 504 / 529；流式仅在发出首字节前 failover
 - 部分上游专有字段按白名单透传，避免 Chat 的 `n` 等泄漏到 Anthropic 导致 400
 - Anthropic 上游若未指定 `max_tokens`，默认补 4096
 - 这是本地网关，默认只绑 `127.0.0.1`；若改成 `0.0.0.0` 请务必设置 `local_api_key`

@@ -35,7 +35,7 @@ tailwind.config={
     <div class="flex items-center gap-4">
       <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 via-indigo-600 to-violet-700 flex items-center justify-center font-bold text-sm tracking-widest shadow-lg shadow-violet-600/20 ring-1 ring-white/10">UR</div>
       <div class="leading-tight">
-        <div class="font-semibold text-[15px] tracking-tight flex items-center gap-2">Universal Router <span class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20">v0.2</span></div>
+        <div class="font-semibold text-[15px] tracking-tight flex items-center gap-2">Universal Router <span class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20">v0.3</span></div>
         <div class="text-[12px] text-zinc-400 hidden sm:block">三协议互转 · 本地网关 · 零延迟</div>
       </div>
       <div class="hidden lg:flex items-center gap-2 ml-6 pl-6 border-l border-zinc-800/60">
@@ -97,6 +97,34 @@ tailwind.config={
           </div>
           <span class="text-[11px] text-zinc-500">留空为本地可信模式；填写后入站需 Bearer 匹配</span>
         </label>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">路由策略</span>
+            <select x-model="serverCfg.route_strategy" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm">
+              <option value="priority">优先级</option>
+              <option value="round_robin">轮询</option>
+              <option value="weighted">加权轮询</option>
+            </select>
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">同节点重试</span>
+            <input x-model.number="serverCfg.retry_count" type="number" min="0" max="8" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
+          </label>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">退避 ms</span>
+            <input x-model.number="serverCfg.retry_backoff_ms" type="number" min="0" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">日志保留条数</span>
+            <input x-model.number="serverCfg.log_retain" type="number" min="100" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm" />
+          </label>
+        </div>
+        <label class="flex items-center gap-2 text-sm text-zinc-300">
+          <input type="checkbox" x-model="serverCfg.failover" class="rounded border-zinc-700 bg-zinc-900" />
+          失败切换到下一提供商
+        </label>
         <button @click="saveServer()" class="w-full mt-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-medium shadow-lg shadow-violet-600/20 transition flex items-center justify-center gap-2">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
           保存网关设置
@@ -126,7 +154,8 @@ tailwind.config={
                 <div class="text-[11px] text-zinc-500 truncate flex items-center gap-1 mt-1"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> <span x-text="p.base_url"></span></div>
                 <div class="flex items-center gap-1.5 mt-2">
                   <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500" x-text="p.models.length+' 模型'"></span>
-                  <span x-show="p.api_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">已配置 Key</span>
+                  <span x-show="p.has_api_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">已配置 Key</span>
+                  <span x-show="p.enabled===false" class="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-300">已停用</span>
                 </div>
               </div>
               <span class="w-1.5 h-1.5 rounded-full mt-2 shrink-0" :class="selectedId===p.id ? 'bg-violet-500' : 'bg-zinc-700 group-hover:bg-zinc-600'"></span>
@@ -180,6 +209,7 @@ tailwind.config={
         <span x-text="play.loading ? '生成中…' : '发送'"></span>
       </button>
       <div x-show="play.error" class="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-xs font-mono text-red-200 whitespace-pre-wrap" x-text="play.error"></div>
+      <div x-show="play.reasoning" class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 text-xs leading-relaxed whitespace-pre-wrap text-amber-100/90" x-text="play.reasoning"></div>
       <div class="rounded-xl border border-zinc-800 bg-zinc-950 min-h-[160px] p-4 text-sm leading-relaxed whitespace-pre-wrap" x-text="play.output || '回复将显示在这里'"></div>
     </div>
 
@@ -202,8 +232,10 @@ tailwind.config={
 
     <div x-show="tab==='logs'" class="flex-1 p-6 overflow-auto custom-scroll" x-cloak>
       <div class="flex items-center justify-between mb-3">
-        <span class="text-sm font-medium">最近请求</span>
+        <span class="text-sm font-medium">最近请求 <span class="text-zinc-500 font-normal" x-text="'· '+logTotal"></span></span>
         <div class="flex gap-2">
+          <button @click="logPrev()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">上一页</button>
+          <button @click="logNext()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">下一页</button>
           <button @click="loadLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">刷新</button>
           <button @click="clearLogs()" class="text-xs px-3 py-1.5 rounded-lg bg-zinc-800">清空</button>
         </div>
@@ -218,6 +250,7 @@ tailwind.config={
             <span class="text-zinc-500" x-text="e.provider_id || '-'"></span>
             <span :class="e.status<400 ? 'text-emerald-300' : 'text-red-300'" x-text="e.status"></span>
             <span class="text-zinc-500" x-text="e.latency_ms + 'ms'"></span>
+            <span x-show="e.attempts>1" class="text-amber-300" x-text="'×'+e.attempts"></span>
             <span x-show="e.stream" class="text-violet-300">stream</span>
             <span x-show="e.error" class="text-red-300/80 truncate max-w-[280px]" x-text="e.error"></span>
           </div>
@@ -285,6 +318,24 @@ tailwind.config={
             <label class="block">
               <span class="text-xs font-medium text-zinc-300">显示名称</span>
               <input x-model="form.display_name" placeholder="我的 AI 提供商" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+            </label>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+            <label class="flex items-center gap-2 text-sm text-zinc-300 mt-6">
+              <input type="checkbox" x-model="form.enabled" class="rounded border-zinc-700 bg-zinc-900" />
+              启用
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-400">优先级</span>
+              <input x-model.number="form.priority" type="number" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-sm" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-400">权重</span>
+              <input x-model.number="form.weight" type="number" min="1" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-sm" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-400">超时秒</span>
+              <input x-model.number="form.timeout_s" type="number" min="5" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-sm" />
             </label>
           </div>
 

@@ -69,7 +69,7 @@ def chat_to_ir(body: dict[str, Any]) -> IRRequest:
         if role == "tool":
             messages.append(IRMessage(role="tool", content=content, tool_call_id=m.get("tool_call_id")))
         else:
-            messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls, reasoning=m.get("reasoning")))
+            messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls, reasoning=m.get("reasoning") or m.get("reasoning_content")))
 
     tools = None
     if body.get("tools"):
@@ -293,6 +293,8 @@ def ir_response_to_responses(ir_resp: IRResponse) -> dict[str, Any]:
     else:
         text = ir_resp.content or ""
     output = []
+    if ir_resp.reasoning:
+        output.append({"type": "reasoning", "summary": [{"type": "summary_text", "text": ir_resp.reasoning}]})
     if text:
         output.append({"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": text}]})
     if ir_resp.tool_calls:

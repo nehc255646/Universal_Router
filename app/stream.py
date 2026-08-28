@@ -81,6 +81,9 @@ def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, 
         delta = ch.get("delta") or {}
         if delta.get("content"):
             out.append({"kind": "text", "text": delta["content"]})
+        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+        if reasoning:
+            out.append({"kind": "reasoning", "text": reasoning})
         for tc in delta.get("tool_calls") or []:
             idx = tc.get("index", 0)
             fn = tc.get("function") or {}
@@ -97,9 +100,21 @@ def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, 
         if t == "response.output_text.delta":
             if data.get("delta"):
                 out.append({"kind": "text", "text": data["delta"]})
+        elif t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+            if data.get("delta"):
+                out.append({"kind": "reasoning", "text": data["delta"]})
         elif t == "response.output_item.added":
             item = data.get("item") or {}
-            if item.get("type") == "function_call":
+            if item.get("type") == "reasoning":
+                summary = item.get("summary") or []
+                txt = ""
+                if isinstance(summary, list):
+                    txt = "".join((s.get("text") if isinstance(s, dict) else str(s)) or "" for s in summary)
+                elif isinstance(summary, str):
+                    txt = summary
+                if txt:
+                    out.append({"kind": "reasoning", "text": txt})
+            elif item.get("type") == "function_call":
                 out.append(
                     {
                         "kind": "tool_start",
@@ -127,10 +142,18 @@ def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, 
             idx = data.get("index", 0)
             if block.get("type") == "tool_use":
                 out.append({"kind": "tool_start", "index": idx, "id": block.get("id") or "", "name": block.get("name") or ""})
+            elif block.get("type") in ("thinking", "redacted_thinking"):
+                thought = block.get("thinking") or ""
+                if thought:
+                    out.append({"kind": "reasoning", "text": thought})
         elif t == "content_block_delta":
             d = data.get("delta") or {}
             if d.get("type") == "text_delta" and d.get("text"):
                 out.append({"kind": "text", "text": d["text"]})
+            elif d.get("type") == "thinking_delta":
+                txt = d.get("thinking") or d.get("text") or ""
+                if txt:
+                    out.append({"kind": "reasoning", "text": txt})
             elif d.get("type") == "input_json_delta" and d.get("partial_json"):
                 out.append({"kind": "tool_args", "index": data.get("index", 0), "arguments": d["partial_json"]})
         elif t == "message_delta":
@@ -192,6 +215,16 @@ async def to_chat_stream(upstream_mode: str, raw: AsyncIterator[bytes], model: s
                     "created": created,
                     "model": model,
                     "choices": [{"index": 0, "delta": {"content": ev["text"]}, "finish_reason": None}],
+                }
+            )
+        elif kind == "reasoning":
+            yield sse_format(
+                {
+                    "id": gen_id,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"reasoning_content": ev["text"]}, "finish_reason": None}],
                 }
             )
         elif kind == "tool_start":
@@ -260,6 +293,9 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
         if kind == "text":
             seq += 1
             yield sse_format({"type": "response.output_text.delta", "delta": ev["text"], "sequence_number": seq, "output_index": 0})
+        elif kind == "reasoning":
+            seq += 1
+            yield sse_format({"type": "response.reasoning_summary_text.delta", "delta": ev["text"], "sequence_number": seq})
         elif kind == "tool_start":
             yield sse_format(
                 {
@@ -295,45 +331,68 @@ async def to_anthropic_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
         {"type": "message_start", "message": {"id": msg_id, "type": "message", "role": "assistant", "model": model, "content": []}},
         event="message_start",
     )
-    yield sse_format({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, event="content_block_start")
-    text_open = True
-    next_index = 1
+    open_kind: str | None = None
+    open_index = -1
+    next_index = 0
     index_map: dict[int, int] = {}
     saw_error = False
     finish = "end_turn"
+
+    def _start(kind: str, block: dict[str, Any]) -> bytes:
+        nonlocal open_kind, open_index, next_index
+        idx = next_index
+        next_index += 1
+        open_kind = kind
+        open_index = idx
+        return sse_format({"type": "content_block_start", "index": idx, "content_block": block}, event="content_block_start")
+
+    def _stop() -> bytes | None:
+        nonlocal open_kind, open_index
+        if open_kind is None:
+            return None
+        payload = sse_format({"type": "content_block_stop", "index": open_index}, event="content_block_stop")
+        open_kind = None
+        return payload
+
     async for ev in _iter_normalized(upstream_mode, raw):
         kind = ev.get("kind")
         if kind == "error":
             saw_error = True
+            stop = _stop()
+            if stop:
+                yield stop
             yield sse_format({"type": "error", "error": ev.get("error")}, event="error")
             break
-        if kind == "text":
-            if not text_open:
-                yield sse_format({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}, event="content_block_start")
-                text_open = True
+        if kind == "reasoning":
+            if open_kind != "thinking":
+                stop = _stop()
+                if stop:
+                    yield stop
+                yield _start("thinking", {"type": "thinking", "thinking": ""})
             yield sse_format(
-                {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": ev["text"]}},
+                {"type": "content_block_delta", "index": open_index, "delta": {"type": "thinking_delta", "thinking": ev["text"]}},
+                event="content_block_delta",
+            )
+        elif kind == "text":
+            if open_kind != "text":
+                stop = _stop()
+                if stop:
+                    yield stop
+                yield _start("text", {"type": "text", "text": ""})
+            yield sse_format(
+                {"type": "content_block_delta", "index": open_index, "delta": {"type": "text_delta", "text": ev["text"]}},
                 event="content_block_delta",
             )
         elif kind == "tool_start":
-            if text_open:
-                yield sse_format({"type": "content_block_stop", "index": 0}, event="content_block_stop")
-                text_open = False
+            stop = _stop()
+            if stop:
+                yield stop
             src_idx = int(ev.get("index") or 0)
-            dst = next_index
-            index_map[src_idx] = dst
-            next_index += 1
-            yield sse_format(
-                {
-                    "type": "content_block_start",
-                    "index": dst,
-                    "content_block": {"type": "tool_use", "id": ev.get("id") or f"toolu_{uuid.uuid4().hex[:8]}", "name": ev.get("name") or "", "input": {}},
-                },
-                event="content_block_start",
-            )
+            yield _start("tool", {"type": "tool_use", "id": ev.get("id") or f"toolu_{uuid.uuid4().hex[:8]}", "name": ev.get("name") or "", "input": {}})
+            index_map[src_idx] = open_index
         elif kind == "tool_args":
             src_idx = int(ev.get("index") or 0)
-            dst = index_map.get(src_idx, next_index - 1)
+            dst = index_map.get(src_idx, open_index)
             yield sse_format(
                 {"type": "content_block_delta", "index": dst, "delta": {"type": "input_json_delta", "partial_json": ev.get("arguments") or ""}},
                 event="content_block_delta",
@@ -349,13 +408,9 @@ async def to_anthropic_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
     if saw_error:
         yield sse_format({"type": "message_stop"}, event="message_stop")
         return
-    if text_open:
-        yield sse_format({"type": "content_block_stop", "index": 0}, event="content_block_stop")
-    else:
-        # 关闭最后一个 tool 块
-        last = max(index_map.values()) if index_map else 0
-        if last:
-            yield sse_format({"type": "content_block_stop", "index": last}, event="content_block_stop")
+    stop = _stop()
+    if stop:
+        yield stop
     yield sse_format({"type": "message_delta", "delta": {"stop_reason": finish, "stop_sequence": None}, "usage": {"output_tokens": 0}}, event="message_delta")
     yield sse_format({"type": "message_stop"}, event="message_stop")
 

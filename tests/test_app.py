@@ -16,7 +16,7 @@ def test_health():
 def test_status_and_models_empty(isolated_config):
     with TestClient(app) as c:
         st = c.get("/api/status").json()
-        assert st["version"] == "0.2.0"
+        assert st["version"] == "0.3.0"
         models = c.get("/v1/models").json()
         assert models["data"] == []
 

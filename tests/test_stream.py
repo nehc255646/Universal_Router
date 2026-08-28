@@ -20,6 +20,18 @@ def test_split_sse_buffer_partial():
     assert b'{"x":' in rest
 
 
+def test_extract_reasoning():
+    ev = _extract_events({"choices": [{"delta": {"reasoning_content": "think"}}]}, "chat_completions")
+    assert ev[0]["kind"] == "reasoning"
+    ev = _extract_events(
+        {"type": "content_block_delta", "delta": {"type": "thinking_delta", "thinking": "hmm"}},
+        "messages",
+    )
+    assert ev[0]["kind"] == "reasoning"
+    ev = _extract_events({"type": "response.reasoning_summary_text.delta", "delta": "r"}, "responses")
+    assert ev[0]["text"] == "r"
+
+
 def test_extract_chat_and_anthropic():
     ev = _extract_events({"choices": [{"delta": {"content": "hi"}}]}, "chat_completions")
     assert ev == [{"kind": "text", "text": "hi"}]

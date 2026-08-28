@@ -33,6 +33,10 @@ class ProviderConfig(BaseModel):
     upstream_mode: str = "chat_completions"
     models: list[ModelInfo] = Field(default_factory=list)
     headers: list[HeaderInfo] = Field(default_factory=list)
+    enabled: bool = True
+    priority: int = 100  # 越小越优先
+    weight: int = 1  # 同优先级加权轮询
+    timeout_s: float = 120
 
     @field_validator("id")
     @classmethod
@@ -56,11 +60,46 @@ class ProviderConfig(BaseModel):
             raise ValueError("base_url 必须以 http 开头")
         return v
 
+    @field_validator("weight")
+    @classmethod
+    def validate_weight(cls, v: int) -> int:
+        return max(1, min(int(v), 100))
+
+    @field_validator("timeout_s")
+    @classmethod
+    def validate_timeout(cls, v: float) -> float:
+        return max(5.0, min(float(v), 600.0))
+
+
+ROUTE_STRATEGIES = {"priority", "round_robin", "weighted"}
+
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8787
     local_api_key: str = ""  # 为空则不鉴权；非空时入站需 Bearer 匹配
+    retry_count: int = 1  # 同一提供商额外重试次数
+    retry_backoff_ms: int = 200
+    failover: bool = True  # 失败后尝试下一个匹配提供商
+    route_strategy: str = "priority"  # priority | round_robin | weighted
+    log_retain: int = 5000
+
+    @field_validator("route_strategy")
+    @classmethod
+    def validate_strategy(cls, v: str) -> str:
+        if v not in ROUTE_STRATEGIES:
+            raise ValueError(f"route_strategy 必须是 {ROUTE_STRATEGIES}")
+        return v
+
+    @field_validator("retry_count")
+    @classmethod
+    def validate_retry(cls, v: int) -> int:
+        return max(0, min(int(v), 8))
+
+    @field_validator("log_retain")
+    @classmethod
+    def validate_retain(cls, v: int) -> int:
+        return max(100, min(int(v), 100000))
 
 
 class AppConfig(BaseModel):
@@ -143,24 +182,10 @@ class ConfigManager:
         return None
 
     def find_provider_by_model(self, model: str) -> ProviderConfig | None:
-        # 支持 provider/model 前缀：仅当 mid 真实归属该 provider 时才路由，否则回落全局搜索
-        if "/" in model:
-            prefix, mid = model.split("/", 1)
-            p = self.find_provider(prefix)
-            if p:
-                if any(m.id == mid for m in p.models):
-                    return p
-                # 前缀存在但 mid 不在该 provider，尝试按 mid 全局匹配（兼容误用 prefix）
-                for pp in self._config.providers:
-                    if any(m.id == mid for m in pp.models):
-                        return pp
-                # 前缀合法但 mid 未配置，仍返回 prefix provider 以保留兼容（上游会按 mid 请求）
-                return p
-        for p in self._config.providers:
-            for m in p.models:
-                if m.id == model:
-                    return p
-        return None
+        from .router import resolve_providers
+
+        found = resolve_providers(model)
+        return found[0] if found else None
 
     def all_api_keys(self) -> set[str]:
         return {p.api_key for p in self._config.providers if p.api_key}
@@ -168,11 +193,15 @@ class ConfigManager:
     def all_models(self) -> list[dict[str, Any]]:
         counts: dict[str, int] = {}
         for p in self._config.providers:
+            if not p.enabled:
+                continue
             for m in p.models:
                 counts[m.id] = counts.get(m.id, 0) + 1
         out: list[dict[str, Any]] = []
         seen: set[str] = set()
         for p in self._config.providers:
+            if not p.enabled:
+                continue
             for m in p.models:
                 display = m.display_name or m.id
                 prefixed = f"{p.id}/{m.id}"

@@ -2,7 +2,12 @@
   "server": {
     "host": "127.0.0.1",
     "port": 8787,
-    "local_api_key": ""
+    "local_api_key": "",
+    "retry_count": 1,
+    "retry_backoff_ms": 200,
+    "failover": true,
+    "route_strategy": "priority",
+    "log_retain": 5000
   },
   "providers": [
     {
@@ -11,6 +16,10 @@
       "base_url": "https://api.openai.com/v1",
       "api_key": "sk-your-key",
       "upstream_mode": "chat_completions",
+      "enabled": true,
+      "priority": 10,
+      "weight": 1,
+      "timeout_s": 120,
       "models": [
         { "id": "gpt-4o", "display_name": "GPT-4o" }
       ],

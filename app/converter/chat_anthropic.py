@@ -95,6 +95,7 @@ def anthropic_to_ir(body: dict[str, Any]) -> IRRequest:
             text_parts: list[IRContent] = []
             tc_list: list[IRToolCall] = []
             tool_results: list[tuple[str, str]] = []  # (id, text)
+            reasoning_txt = ""
             for c in raw:
                 if not isinstance(c, dict):
                     continue
@@ -107,6 +108,8 @@ def anthropic_to_ir(body: dict[str, Any]) -> IRRequest:
                     if src.get("type") == "base64":
                         url = f"data:{src.get('media_type')};base64,{src.get('data')}"
                     text_parts.append(IRContent(type="image_url", image_url=url))
+                elif t in ("thinking", "redacted_thinking"):
+                    reasoning_txt += c.get("thinking") or ""
                 elif t == "tool_use":
                     tc_list.append(IRToolCall(id=c.get("id") or f"toolu_{uuid.uuid4().hex[:8]}", name=c.get("name") or "", arguments=json.dumps(c.get("input") or {}, ensure_ascii=False)))
                 elif t == "tool_result":
@@ -133,7 +136,7 @@ def anthropic_to_ir(body: dict[str, Any]) -> IRRequest:
                         content = text_parts if text_parts else ""
                     # 若纯 tool_result 且无其他内容，则不发主消息
                     if not (len(tool_results) == len(raw) and not tc_list and not text_parts):
-                        messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls if tc_list else None))
+                        messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls if tc_list else None, reasoning=reasoning_txt or None))
                 for tid, txt in tool_results:
                     messages.append(IRMessage(role="tool", content=txt or "", tool_call_id=tid))
                 continue
@@ -145,7 +148,7 @@ def anthropic_to_ir(body: dict[str, Any]) -> IRRequest:
                 content = text_parts[0].text or ""
             else:
                 content = text_parts if text_parts else ""
-            messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls if tc_list else None))
+            messages.append(IRMessage(role=role, content=content, tool_calls=tool_calls if tc_list else None, reasoning=reasoning_txt or None))
         else:
             messages.append(IRMessage(role=role, content=str(raw) if raw is not None else ""))
 
@@ -274,6 +277,8 @@ def ir_to_anthropic(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
 
 def ir_response_to_anthropic(ir_resp: IRResponse) -> dict[str, Any]:
     content: list[dict[str, Any]] = []
+    if ir_resp.reasoning:
+        content.append({"type": "thinking", "thinking": ir_resp.reasoning})
     if isinstance(ir_resp.content, list):
         for c in ir_resp.content:
             if c.type == "text" and c.text:

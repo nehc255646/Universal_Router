@@ -1,18 +1,73 @@
-"""内存环形访问日志，供管理页查看最近请求。"""
+"""SQLite 持久化访问日志。"""
 from __future__ import annotations
 
+import os
+import sqlite3
 import threading
 import time
-from collections import deque
+from pathlib import Path
 from typing import Any
 
 _lock = threading.Lock()
-_logs: deque[dict[str, Any]] = deque(maxlen=200)
 _started = time.time()
+_conn: sqlite3.Connection | None = None
+_path: Path | None = None
+
+DEFAULT_RETAIN = 5000
 
 
 def started_at() -> float:
     return _started
+
+
+def default_path() -> Path:
+    env = os.getenv("UR_LOG_DB")
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parent.parent / "data" / "access.db"
+
+
+def configure(path: Path | None = None) -> None:
+    global _conn, _path
+    with _lock:
+        if _conn is not None:
+            try:
+                _conn.close()
+            except Exception:
+                pass
+            _conn = None
+        _path = path or default_path()
+
+
+def _db() -> sqlite3.Connection:
+    global _conn, _path
+    if _conn is None:
+        if _path is None:
+            _path = default_path()
+        _path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(_path), check_same_thread=False, timeout=8)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                inbound TEXT,
+                model TEXT,
+                provider_id TEXT,
+                stream INTEGER,
+                status INTEGER,
+                latency_ms INTEGER,
+                error TEXT,
+                attempts INTEGER DEFAULT 1
+            )
+            """
+        )
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts DESC)")
+        conn.commit()
+        _conn = conn
+    return _conn
 
 
 def add(
@@ -24,26 +79,68 @@ def add(
     status: int,
     latency_ms: int,
     error: str | None = None,
+    attempts: int = 1,
+    retain: int | None = None,
 ) -> None:
-    entry = {
-        "ts": time.time(),
-        "inbound": inbound,
-        "model": model,
-        "provider_id": provider_id,
-        "stream": stream,
-        "status": status,
-        "latency_ms": latency_ms,
-        "error": error,
-    }
+    from .config import config_manager
+
+    keep = retain if retain is not None else int(getattr(config_manager.config.server, "log_retain", DEFAULT_RETAIN) or DEFAULT_RETAIN)
+    row = (
+        time.time(),
+        inbound,
+        model,
+        provider_id,
+        1 if stream else 0,
+        status,
+        latency_ms,
+        (error or "")[:2000] or None,
+        attempts,
+    )
     with _lock:
-        _logs.appendleft(entry)
+        db = _db()
+        db.execute(
+            "INSERT INTO logs (ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts) VALUES (?,?,?,?,?,?,?,?,?)",
+            row,
+        )
+        db.commit()
+        cur = db.execute("SELECT COUNT(*) FROM logs")
+        n = int(cur.fetchone()[0])
+        if n > keep * 1.2:
+            db.execute("DELETE FROM logs WHERE id IN (SELECT id FROM logs ORDER BY ts ASC LIMIT ?)", (n - keep,))
+            db.commit()
 
 
-def list_logs(limit: int = 100) -> list[dict[str, Any]]:
+def list_logs(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
     with _lock:
-        return list(_logs)[:limit]
+        db = _db()
+        total = int(db.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
+        rows = db.execute(
+            "SELECT id, ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts FROM logs ORDER BY ts DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        ).fetchall()
+    items = []
+    for r in rows:
+        items.append(
+            {
+                "id": r["id"],
+                "ts": r["ts"],
+                "inbound": r["inbound"],
+                "model": r["model"],
+                "provider_id": r["provider_id"],
+                "stream": bool(r["stream"]),
+                "status": r["status"],
+                "latency_ms": r["latency_ms"],
+                "error": r["error"],
+                "attempts": r["attempts"],
+            }
+        )
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 def clear() -> None:
     with _lock:
-        _logs.clear()
+        db = _db()
+        db.execute("DELETE FROM logs")
+        db.commit()

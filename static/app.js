@@ -3,7 +3,7 @@ function app() {
     providers: [],
     selectedId: null,
     selected: null,
-    form: { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [], headers: [] },
+    form: { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120 },
     showKey: false,
     msg: '',
     msgOk: true,
@@ -11,11 +11,14 @@ function app() {
     testing: false,
     healthOk: false,
     gatewayUrl: 'http://127.0.0.1:8787/v1',
-    serverCfg: { host:'127.0.0.1', port:8787, local_api_key:'' },
+    serverCfg: { host:'127.0.0.1', port:8787, local_api_key:'', retry_count:1, retry_backoff_ms:200, failover:true, route_strategy:'priority', log_retain:5000 },
     showLocalKey: false,
     tab: 'config',
     fetchingModels: false,
     logs: [],
+    logTotal: 0,
+    logOffset: 0,
+    logLimit: 50,
     status: null,
     presets: [
       { id: 'openai', display_name: 'OpenAI', base_url: 'https://api.openai.com/v1', upstream_mode: 'chat_completions', models: [{id:'gpt-4o', display_name:'GPT-4o'}, {id:'gpt-4o-mini', display_name:'GPT-4o mini'}] },
@@ -23,7 +26,7 @@ function app() {
       { id: 'openrouter', display_name: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', upstream_mode: 'chat_completions', models: [{id:'openai/gpt-4o', display_name:'GPT-4o'}, {id:'anthropic/claude-sonnet-4', display_name:'Claude Sonnet 4'}] },
       { id: 'deepseek', display_name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', upstream_mode: 'chat_completions', models: [{id:'deepseek-chat', display_name:'DeepSeek Chat'}, {id:'deepseek-reasoner', display_name:'DeepSeek Reasoner'}] },
     ],
-    play: { model: '', protocol: 'chat', stream: true, system: '', prompt: '', output: '', loading: false, error: '' },
+    play: { model: '', protocol: 'chat', stream: true, system: '', prompt: '', output: '', reasoning: '', loading: false, error: '' },
 
     async init() {
       await this.refresh();
@@ -36,7 +39,7 @@ function app() {
     async loadServer(){
       try{
         const cfg = await fetch('/api/config').then(x=>x.json());
-        if(cfg.server){ this.serverCfg = cfg.server; this.gatewayUrl=`http://${cfg.server.host}:${cfg.server.port}/v1`; }
+        if(cfg.server){ this.serverCfg = {...this.serverCfg, ...cfg.server}; this.gatewayUrl=`http://${cfg.server.host}:${cfg.server.port}/v1`; }
       }catch{}
     },
     async loadStatus(){
@@ -103,7 +106,7 @@ function app() {
     addProvider() {
       this.selectedId = null;
       this.selected = { id: '' };
-      this.form = { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [{id:'',display_name:''}], headers: [], has_api_key: false };
+      this.form = { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [{id:'',display_name:''}], headers: [], has_api_key: false, enabled: true, priority: 100, weight: 1, timeout_s: 120 };
       this.msg=''; this.testResult='';
       this.tab = 'config';
     },
@@ -177,11 +180,24 @@ function app() {
       this.fetchingModels = false;
     },
     async loadLogs() {
-      try { this.logs = await fetch('/api/logs').then(x=>x.json()); } catch { this.logs = []; }
+      try {
+        const data = await fetch(`/api/logs?limit=${this.logLimit}&offset=${this.logOffset}`).then(x=>x.json());
+        if (Array.isArray(data)) { this.logs = data; this.logTotal = data.length; }
+        else { this.logs = data.items || []; this.logTotal = data.total || 0; }
+      } catch { this.logs = []; }
     },
     async clearLogs() {
       await fetch('/api/logs', {method:'DELETE'});
-      this.logs = [];
+      this.logs = []; this.logTotal = 0; this.logOffset = 0;
+    },
+    async logPrev() {
+      this.logOffset = Math.max(0, this.logOffset - this.logLimit);
+      await this.loadLogs();
+    },
+    async logNext() {
+      if (this.logOffset + this.logLimit >= this.logTotal) return;
+      this.logOffset += this.logLimit;
+      await this.loadLogs();
     },
     fmtTime(ts) {
       const d = new Date(ts * 1000);
@@ -208,7 +224,7 @@ print(r.choices[0].message.content)`;
     async sendPlay() {
       if (!this.play.prompt.trim()) { this.toast('请输入内容', false); return; }
       if (!this.play.model) { this.toast('请选择模型', false); return; }
-      this.play.loading = true; this.play.output = ''; this.play.error = '';
+      this.play.loading = true; this.play.output = ''; this.play.reasoning = ''; this.play.error = '';
       const messages = [];
       if (this.play.system.trim()) messages.push({role:'system', content: this.play.system.trim()});
       messages.push({role:'user', content: this.play.prompt.trim()});
@@ -230,6 +246,7 @@ print(r.choices[0].message.content)`;
           const data = await r.json();
           if (!r.ok) { this.play.error = JSON.stringify(data, null, 2); this.play.loading=false; return; }
           this.play.output = this.extractText(data, this.play.protocol);
+          this.play.reasoning = this.extractReasoningFull(data, this.play.protocol);
           this.play.loading=false;
           this.loadLogs();
           return;
@@ -260,6 +277,8 @@ print(r.choices[0].message.content)`;
                 if (ev.error) { this.play.error = JSON.stringify(ev.error); continue; }
                 const d = this.extractDelta(ev, this.play.protocol);
                 if (d) this.play.output += d;
+                const th = this.extractReasoning(ev, this.play.protocol);
+                if (th) this.play.reasoning += th;
               } catch {}
             }
           }
@@ -269,6 +288,16 @@ print(r.choices[0].message.content)`;
       }
       this.play.loading = false;
       this.loadLogs();
+    },
+    extractReasoningFull(data, proto) {
+      if (proto === 'chat') return (((data.choices||[])[0]||{}).message||{}).reasoning_content || '';
+      if (proto === 'responses') {
+        const item = (data.output||[]).find(x=>x.type==='reasoning');
+        if (!item) return '';
+        return ((item.summary||[]).map(s=>s.text||'').join('')) || '';
+      }
+      if (proto === 'messages') return (data.content||[]).filter(c=>c.type==='thinking').map(c=>c.thinking||'').join('');
+      return '';
     },
     extractText(data, proto) {
       if (proto === 'chat') return (((data.choices||[])[0]||{}).message||{}).content || '';
@@ -289,6 +318,12 @@ print(r.choices[0].message.content)`;
       if (proto === 'chat') return (((ev.choices||[])[0]||{}).delta||{}).content || '';
       if (proto === 'responses' && ev.type === 'response.output_text.delta') return ev.delta || '';
       if (proto === 'messages' && ev.type === 'content_block_delta' && ev.delta && ev.delta.type==='text_delta') return ev.delta.text || '';
+      return '';
+    },
+    extractReasoning(ev, proto) {
+      if (proto === 'chat') return (((ev.choices||[])[0]||{}).delta||{}).reasoning_content || '';
+      if (proto === 'responses' && (ev.type === 'response.reasoning_summary_text.delta' || ev.type === 'response.reasoning_text.delta')) return ev.delta || '';
+      if (proto === 'messages' && ev.type === 'content_block_delta' && ev.delta && ev.delta.type==='thinking_delta') return ev.delta.thinking || ev.delta.text || '';
       return '';
     }
   }
