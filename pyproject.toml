@@ -1,10 +1,15 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "universal-router"
 version = "0.3.0"
 description = "Universal Router — 本地三协议互转网关（Chat Completions / Responses / Messages）"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -25,6 +30,10 @@ universal-router = "app.main:run"
 [project.urls]
 Homepage = "https://github.com/nehc255646/Universal_Router"
 Repository = "https://github.com/nehc255646/Universal_Router"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["tests*", "static*"]
 
 [tool.uvicorn]
 host = "127.0.0.1"
