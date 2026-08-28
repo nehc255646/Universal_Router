@@ -60,10 +60,17 @@ def _db() -> sqlite3.Connection:
                 status INTEGER,
                 latency_ms INTEGER,
                 error TEXT,
-                attempts INTEGER DEFAULT 1
+                attempts INTEGER DEFAULT 1,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER
             )
             """
         )
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(logs)").fetchall()}
+        if "prompt_tokens" not in cols:
+            conn.execute("ALTER TABLE logs ADD COLUMN prompt_tokens INTEGER")
+        if "completion_tokens" not in cols:
+            conn.execute("ALTER TABLE logs ADD COLUMN completion_tokens INTEGER")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_logs_ts ON logs(ts DESC)")
         conn.commit()
         _conn = conn
@@ -81,10 +88,19 @@ def add(
     error: str | None = None,
     attempts: int = 1,
     retain: int | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
 ) -> None:
     from .config import config_manager
+    from .secrets import collect_secrets, redact
 
     keep = retain if retain is not None else int(getattr(config_manager.config.server, "log_retain", DEFAULT_RETAIN) or DEFAULT_RETAIN)
+    extras = collect_secrets(
+        config_manager.config.server.local_api_key,
+        config_manager.config.server.admin_api_key,
+        *[p.api_key for p in config_manager.config.providers],
+    )
+    err = redact((error or "")[:2000], extras) or None
     row = (
         time.time(),
         inbound,
@@ -93,13 +109,15 @@ def add(
         1 if stream else 0,
         status,
         latency_ms,
-        (error or "")[:2000] or None,
+        err,
         attempts,
+        prompt_tokens,
+        completion_tokens,
     )
     with _lock:
         db = _db()
         db.execute(
-            "INSERT INTO logs (ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO logs (ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts, prompt_tokens, completion_tokens) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             row,
         )
         db.commit()
@@ -117,7 +135,7 @@ def list_logs(limit: int = 100, offset: int = 0) -> dict[str, Any]:
         db = _db()
         total = int(db.execute("SELECT COUNT(*) FROM logs").fetchone()[0])
         rows = db.execute(
-            "SELECT id, ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts FROM logs ORDER BY ts DESC LIMIT ? OFFSET ?",
+            "SELECT id, ts, inbound, model, provider_id, stream, status, latency_ms, error, attempts, prompt_tokens, completion_tokens FROM logs ORDER BY ts DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
     items = []
@@ -134,6 +152,8 @@ def list_logs(limit: int = 100, offset: int = 0) -> dict[str, Any]:
                 "latency_ms": r["latency_ms"],
                 "error": r["error"],
                 "attempts": r["attempts"],
+                "prompt_tokens": r["prompt_tokens"],
+                "completion_tokens": r["completion_tokens"],
             }
         )
     return {"items": items, "total": total, "limit": limit, "offset": offset}

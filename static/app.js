@@ -3,7 +3,7 @@ function app() {
     providers: [],
     selectedId: null,
     selected: null,
-    form: { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120 },
+    form: { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 },
     showKey: false,
     msg: '',
     msgOk: true,
@@ -11,7 +11,10 @@ function app() {
     testing: false,
     healthOk: false,
     gatewayUrl: 'http://127.0.0.1:8787/v1',
-    serverCfg: { host:'127.0.0.1', port:8787, local_api_key:'', retry_count:1, retry_backoff_ms:200, failover:true, route_strategy:'priority', log_retain:5000 },
+    serverCfg: { host:'127.0.0.1', port:8787, local_api_key:'', admin_api_key:'', retry_count:1, retry_backoff_ms:200, failover:true, route_strategy:'priority', log_retain:5000, connect_timeout_s:15, first_token_timeout_s:45, read_idle_timeout_s:90, circuit_breaker:true, circuit_fail_threshold:3, circuit_cooldown_s:30, has_local_api_key:false, has_admin_api_key:false },
+    adminKey: localStorage.getItem('ur_admin_key') || '',
+    needAdmin: false,
+    providerHealth: {},
     showLocalKey: false,
     tab: 'config',
     fetchingModels: false,
@@ -36,20 +39,65 @@ function app() {
       this.loadStatus();
       setInterval(() => this.checkHealth(), 10000);
     },
+    adminHeaders() {
+      const h = {'Content-Type':'application/json'};
+      const k = (this.adminKey || '').trim();
+      if (k) { h['Authorization'] = 'Bearer ' + k; h['X-Admin-Key'] = k; }
+      return h;
+    },
+    async api(path, opts={}) {
+      const r = await fetch(path, {...opts, headers:{...this.adminHeaders(), ...(opts.headers||{})}});
+      if (r.status === 401 || r.status === 403) this.needAdmin = true;
+      else if (r.ok) this.needAdmin = false;
+      return r;
+    },
+    async unlockAdmin() {
+      localStorage.setItem('ur_admin_key', this.adminKey || '');
+      this.needAdmin = false;
+      await this.refresh();
+      await this.loadServer();
+      await this.loadStatus();
+    },
+    healthOf(id) { return this.providerHealth[id] || null; },
+    healthLabel(id) {
+      const h = this.healthOf(id);
+      if (!h) return '';
+      const lat = h.ewma_latency_ms ? Math.round(h.ewma_latency_ms)+'ms' : '';
+      return (h.state || 'closed') + (lat ? ' · '+lat : '');
+    },
+    healthBadgeClass(id) {
+      const h = this.healthOf(id);
+      if (!h) return 'bg-zinc-800 text-zinc-500';
+      if (h.state === 'open') return 'bg-red-500/15 text-red-300';
+      if (h.state === 'half_open') return 'bg-amber-500/15 text-amber-300';
+      return 'bg-emerald-500/15 text-emerald-300';
+    },
     async loadServer(){
       try{
-        const cfg = await fetch('/api/config').then(x=>x.json());
+        const r = await this.api('/api/config');
+        const cfg = await r.json();
         if(cfg.server){ this.serverCfg = {...this.serverCfg, ...cfg.server}; this.gatewayUrl=`http://${cfg.server.host}:${cfg.server.port}/v1`; }
       }catch{}
     },
     async loadStatus(){
-      try { this.status = await fetch('/api/status').then(x=>x.json()); } catch { this.status = null; }
+      try {
+        const r = await this.api('/api/status');
+        this.status = await r.json();
+        const map = {};
+        for (const h of (this.status && this.status.provider_health) || []) map[h.provider_id] = h;
+        this.providerHealth = map;
+      } catch { this.status = null; }
     },
     async saveServer(){
-      const r=await fetch('/api/config',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({server:this.serverCfg})});
+      const srv = {...this.serverCfg};
+      if (!srv.local_api_key) delete srv.local_api_key;
+      if (!srv.admin_api_key) delete srv.admin_api_key;
+      const r=await this.api('/api/config',{method:'PUT',body:JSON.stringify({server:srv})});
       const d=await r.json();
       if(!r.ok){ this.toast(d.detail||JSON.stringify(d),false); return; }
-      this.serverCfg=d.server; this.gatewayUrl=`http://${d.server.host}:${d.server.port}/v1`;
+      const typedAdmin = (srv.admin_api_key || srv.local_api_key || '').trim();
+      if (typedAdmin) { this.adminKey = typedAdmin; localStorage.setItem('ur_admin_key', typedAdmin); }
+      this.serverCfg={...this.serverCfg, ...d.server}; this.gatewayUrl=`http://${d.server.host}:${d.server.port}/v1`;
       this.toast('网关配置已保存，重启后生效',true);
     },
     async checkHealth() {
@@ -71,18 +119,20 @@ function app() {
     },
     authHeaders() {
       const h = {'Content-Type':'application/json'};
-      const k = (this.serverCfg.local_api_key || '').trim();
+      const k = (this.serverCfg.local_api_key || this.adminKey || '').trim();
       if (k) h['Authorization'] = 'Bearer ' + k;
       return h;
     },
     async refresh() {
-      const r = await fetch('/api/providers');
+      const r = await this.api('/api/providers');
       this.providers = await r.json();
+      if (!Array.isArray(this.providers)) this.providers = [];
       if (this.selectedId) this.select(this.selectedId);
       if (!this.play.model) {
         const all = this.allModels();
         if (all.length) this.play.model = all[0].id;
       }
+      this.loadStatus();
     },
     allModels() {
       const out = [];
@@ -99,14 +149,14 @@ function app() {
       if (!p) { this.selected=null; return; }
       this.selected = p;
       this.form = JSON.parse(JSON.stringify(p));
-      this.form.api_key = '';
+      if (!p.api_key_is_ref) this.form.api_key = '';
       this.msg=''; this.testResult='';
       this.tab = 'config';
     },
     addProvider() {
       this.selectedId = null;
       this.selected = { id: '' };
-      this.form = { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [{id:'',display_name:''}], headers: [], has_api_key: false, enabled: true, priority: 100, weight: 1, timeout_s: 120 };
+      this.form = { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [{id:'',display_name:''}], headers: [], has_api_key: false, enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 };
       this.msg=''; this.testResult='';
       this.tab = 'config';
     },
@@ -129,7 +179,7 @@ function app() {
       }
       const body = {...this.form, models: this.form.models.filter(m=>m.id && m.id.trim()), headers: this.form.headers.filter(h=>h.name && h.name.trim())};
       if (!body.api_key) delete body.api_key;
-      const r = await fetch(url, {method, headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const r = await this.api(url, {method, body: JSON.stringify(body)});
       const data = await r.json();
       if (!r.ok) { this.toast(data.detail || JSON.stringify(data), false); return; }
       this.toast('保存成功', true);
@@ -139,7 +189,7 @@ function app() {
     async clearKey() {
       if (!this.selectedId) { this.form.api_key=''; this.form.has_api_key=false; return; }
       const body = {...this.form, api_key:'', clear_api_key:true, models: this.form.models.filter(m=>m.id && m.id.trim()), headers: this.form.headers.filter(h=>h.name && h.name.trim())};
-      const r = await fetch(`/api/providers/${this.selectedId}`, {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+      const r = await this.api(`/api/providers/${this.selectedId}`, {method:'PUT', body: JSON.stringify(body)});
       const data = await r.json();
       if (!r.ok) { this.toast(data.detail || JSON.stringify(data), false); return; }
       this.toast('密钥已清除', true);
@@ -148,7 +198,7 @@ function app() {
     },
     async remove() {
       if (!this.selectedId || !confirm(`删除 ${this.selectedId} ?`)) return;
-      const r = await fetch(`/api/providers/${this.selectedId}`, {method:'DELETE'});
+      const r = await this.api(`/api/providers/${this.selectedId}`, {method:'DELETE'});
       if (!r.ok) { this.toast('删除失败', false); return; }
       this.selectedId=null; this.selected=null;
       await this.refresh();
@@ -157,7 +207,7 @@ function app() {
       if (!this.selectedId) { this.toast('请先保存', false); return; }
       this.testing=true; this.testResult='';
       try {
-        const r = await fetch(`/api/providers/${this.selectedId}/test`, {method:'POST'});
+        const r = await this.api(`/api/providers/${this.selectedId}/test`, {method:'POST'});
         const data = await r.json();
         this.testResult = JSON.stringify(data, null, 2);
         this.toast(data.ok ? `连通 ${data.latency_ms}ms` : '测试失败', !!data.ok);
@@ -168,7 +218,7 @@ function app() {
       if (!this.selectedId) { this.toast('请先保存提供商', false); return; }
       this.fetchingModels = true;
       try {
-        const r = await fetch(`/api/providers/${this.selectedId}/models/fetch`, {method:'POST'});
+        const r = await this.api(`/api/providers/${this.selectedId}/models/fetch`, {method:'POST'});
         const data = await r.json();
         if (!r.ok || !data.ok) { this.toast((data.error && JSON.stringify(data.error)) || '拉取失败', false); return; }
         const existing = new Set(this.form.models.map(m=>m.id));
@@ -181,13 +231,13 @@ function app() {
     },
     async loadLogs() {
       try {
-        const data = await fetch(`/api/logs?limit=${this.logLimit}&offset=${this.logOffset}`).then(x=>x.json());
+        const data = await this.api(`/api/logs?limit=${this.logLimit}&offset=${this.logOffset}`).then(x=>x.json());
         if (Array.isArray(data)) { this.logs = data; this.logTotal = data.length; }
         else { this.logs = data.items || []; this.logTotal = data.total || 0; }
       } catch { this.logs = []; }
     },
     async clearLogs() {
-      await fetch('/api/logs', {method:'DELETE'});
+      await this.api('/api/logs', {method:'DELETE'});
       this.logs = []; this.logTotal = 0; this.logOffset = 0;
     },
     async logPrev() {

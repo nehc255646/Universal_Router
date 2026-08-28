@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import access_log
+from app import access_log, health as provider_health
 from app.config import AppConfig, ConfigManager, config_manager
 from app.router import reset_rr
 
@@ -16,6 +16,7 @@ def isolated_config(tmp_path):
     config_manager._config = AppConfig()
     access_log.configure(tmp_path / "access.db")
     reset_rr()
+    provider_health.reset_health()
     yield config_manager
     config_manager.path = old_path
     config_manager._config = old_cfg

@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
+from .secrets import is_secret_ref, resolve_secret
+
 CONFIG_PATH = Path(os.getenv("UR_CONFIG") or Path(__file__).resolve().parent.parent / "config.json")
 ID_RE = re.compile(r"^[a-z0-9\-_]+$")
 UPSTREAM_MODES = {"chat_completions", "responses", "messages"}
@@ -37,6 +39,8 @@ class ProviderConfig(BaseModel):
     priority: int = 100  # 越小越优先
     weight: int = 1  # 同优先级加权轮询
     timeout_s: float = 120
+    cost_input_per_1m: float = 0.0
+    cost_output_per_1m: float = 0.0
 
     @field_validator("id")
     @classmethod
@@ -70,19 +74,31 @@ class ProviderConfig(BaseModel):
     def validate_timeout(cls, v: float) -> float:
         return max(5.0, min(float(v), 600.0))
 
+    @field_validator("cost_input_per_1m", "cost_output_per_1m")
+    @classmethod
+    def validate_cost(cls, v: float) -> float:
+        return max(0.0, float(v))
 
-ROUTE_STRATEGIES = {"priority", "round_robin", "weighted"}
+
+ROUTE_STRATEGIES = {"priority", "round_robin", "weighted", "latency", "health", "cost"}
 
 
 class ServerConfig(BaseModel):
     host: str = "127.0.0.1"
     port: int = 8787
     local_api_key: str = ""  # 为空则不鉴权；非空时入站需 Bearer 匹配
+    admin_api_key: str = ""  # 管理 /api/* ；非本机绑定时与 local_api_key 至少设一个
     retry_count: int = 1  # 同一提供商额外重试次数
     retry_backoff_ms: int = 200
     failover: bool = True  # 失败后尝试下一个匹配提供商
-    route_strategy: str = "priority"  # priority | round_robin | weighted
+    route_strategy: str = "priority"  # priority | round_robin | weighted | latency | health | cost
     log_retain: int = 5000
+    connect_timeout_s: float = 15
+    first_token_timeout_s: float = 45
+    read_idle_timeout_s: float = 90
+    circuit_breaker: bool = True
+    circuit_fail_threshold: int = 3
+    circuit_cooldown_s: float = 30
 
     @field_validator("route_strategy")
     @classmethod
@@ -100,6 +116,26 @@ class ServerConfig(BaseModel):
     @classmethod
     def validate_retain(cls, v: int) -> int:
         return max(100, min(int(v), 100000))
+
+    @field_validator("connect_timeout_s")
+    @classmethod
+    def validate_connect(cls, v: float) -> float:
+        return max(1.0, min(float(v), 120.0))
+
+    @field_validator("first_token_timeout_s", "read_idle_timeout_s")
+    @classmethod
+    def validate_stream_timeout(cls, v: float) -> float:
+        return max(0.0, min(float(v), 600.0))
+
+    @field_validator("circuit_fail_threshold")
+    @classmethod
+    def validate_circuit_n(cls, v: int) -> int:
+        return max(1, min(int(v), 20))
+
+    @field_validator("circuit_cooldown_s")
+    @classmethod
+    def validate_cooldown(cls, v: float) -> float:
+        return max(1.0, min(float(v), 3600.0))
 
 
 class AppConfig(BaseModel):
@@ -188,7 +224,16 @@ class ConfigManager:
         return found[0] if found else None
 
     def all_api_keys(self) -> set[str]:
-        return {p.api_key for p in self._config.providers if p.api_key}
+        keys: set[str] = set()
+        for p in self._config.providers:
+            if not p.api_key:
+                continue
+            resolved = resolve_secret(p.api_key)
+            if resolved:
+                keys.add(resolved)
+            if not is_secret_ref(p.api_key):
+                keys.add(p.api_key)
+        return keys
 
     def all_models(self) -> list[dict[str, Any]]:
         counts: dict[str, int] = {}
@@ -222,11 +267,45 @@ class ConfigManager:
         return out
 
 
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def is_loopback_bind(host: str | None) -> bool:
+    return (host or "127.0.0.1").strip().lower() in LOOPBACK_HOSTS
+
+
 def provider_public_dict(p: ProviderConfig) -> dict[str, Any]:
     d = p.model_dump()
     d["has_api_key"] = bool(p.api_key)
-    d["api_key"] = ""
+    d["api_key_is_ref"] = is_secret_ref(p.api_key)
+    d["api_key"] = p.api_key if is_secret_ref(p.api_key) else ""
     return d
+
+
+def server_public_dict(s: ServerConfig) -> dict[str, Any]:
+    d = s.model_dump()
+    d["has_local_api_key"] = bool(s.local_api_key)
+    d["has_admin_api_key"] = bool(s.admin_api_key)
+    d["local_api_key"] = ""
+    d["admin_api_key"] = ""
+    return d
+
+
+def apply_incoming_server(body: dict[str, Any], existing: ServerConfig) -> dict[str, Any]:
+    body = dict(body)
+    if body.pop("clear_admin_api_key", False):
+        body["admin_api_key"] = ""
+    else:
+        incoming = (body.get("admin_api_key") or "").strip()
+        if not incoming or incoming.strip("*") == "":
+            body["admin_api_key"] = existing.admin_api_key
+    if body.pop("clear_local_api_key", False):
+        body["local_api_key"] = ""
+    else:
+        incoming = (body.get("local_api_key") or "").strip()
+        if not incoming or incoming.strip("*") == "":
+            body["local_api_key"] = existing.local_api_key
+    return body
 
 
 def apply_incoming_key(body: dict[str, Any], existing: ProviderConfig | None) -> dict[str, Any]:

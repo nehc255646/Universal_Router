@@ -5,7 +5,7 @@ import json
 import uuid
 from typing import Any
 
-from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall
+from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall, messages_to_items
 from .common import extract_text
 from .extras import ANTHROPIC_PASSTHROUGH, take_extras
 
@@ -161,6 +161,7 @@ def anthropic_to_ir(body: dict[str, Any]) -> IRRequest:
     return IRRequest(
         model=model,
         messages=messages,
+        items=messages_to_items(messages),
         tools=tools,
         tool_choice=body.get("tool_choice"),
         stream=bool(body.get("stream")),

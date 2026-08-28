@@ -3,23 +3,32 @@
     "host": "127.0.0.1",
     "port": 8787,
     "local_api_key": "",
+    "admin_api_key": "",
     "retry_count": 1,
     "retry_backoff_ms": 200,
     "failover": true,
     "route_strategy": "priority",
-    "log_retain": 5000
+    "log_retain": 5000,
+    "connect_timeout_s": 15,
+    "first_token_timeout_s": 45,
+    "read_idle_timeout_s": 90,
+    "circuit_breaker": true,
+    "circuit_fail_threshold": 3,
+    "circuit_cooldown_s": 30
   },
   "providers": [
     {
       "id": "openai",
       "display_name": "OpenAI",
       "base_url": "https://api.openai.com/v1",
-      "api_key": "sk-your-key",
+      "api_key": "env:OPENAI_API_KEY",
       "upstream_mode": "chat_completions",
       "enabled": true,
       "priority": 10,
       "weight": 1,
       "timeout_s": 120,
+      "cost_input_per_1m": 0,
+      "cost_output_per_1m": 0,
       "models": [
         { "id": "gpt-4o", "display_name": "GPT-4o" }
       ],

@@ -6,7 +6,7 @@ import time
 import uuid
 from typing import Any, AsyncIterator
 
-from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall
+from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall, messages_to_items
 from .common import extract_text
 from .extras import CHAT_PASSTHROUGH, RESPONSES_PASSTHROUGH, take_extras
 
@@ -81,6 +81,7 @@ def chat_to_ir(body: dict[str, Any]) -> IRRequest:
     return IRRequest(
         model=model,
         messages=messages,
+        items=messages_to_items(messages),
         tools=tools,
         tool_choice=body.get("tool_choice"),
         stream=bool(body.get("stream")),
@@ -170,11 +171,21 @@ def responses_to_ir(body: dict[str, Any]) -> IRRequest:
                 continue
             # 兼容 responses 的 function_call 顶层项：{"type":"function_call","call_id":...}
             if m.get("type") == "function_call":
-                # 作为 assistant 的 tool_calls 历史
                 messages.append(IRMessage(role="assistant", content="", tool_calls=[IRToolCall(id=m.get("call_id") or m.get("id") or f"call_{uuid.uuid4().hex[:8]}", name=m.get("name") or "", arguments=m.get("arguments") or "{}")]))
                 continue
             if m.get("type") == "function_call_output":
                 messages.append(IRMessage(role="tool", content=m.get("output") or "", tool_call_id=m.get("call_id")))
+                continue
+            if m.get("type") == "reasoning":
+                summary = m.get("summary") or []
+                txt = ""
+                if isinstance(summary, list):
+                    txt = "".join((s.get("text") if isinstance(s, dict) else str(s)) or "" for s in summary)
+                elif isinstance(summary, str):
+                    txt = summary
+                messages.append(IRMessage(role="assistant", content="", reasoning=txt or m.get("content") or ""))
+                continue
+            if m.get("type") == "item_reference":
                 continue
             role = m.get("role", "user")
             raw_content = m.get("content")
@@ -218,6 +229,7 @@ def responses_to_ir(body: dict[str, Any]) -> IRRequest:
     return IRRequest(
         model=model,
         messages=messages,
+        items=messages_to_items(messages),
         tools=tools,
         tool_choice=body.get("tool_choice"),
         stream=bool(body.get("stream")),
@@ -228,41 +240,45 @@ def responses_to_ir(body: dict[str, Any]) -> IRRequest:
     )
 
 
+def _item_content(content: str | list[IRContent] | None) -> Any:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for c in content:
+            if c.type == "text":
+                parts.append({"type": "input_text", "text": c.text or ""})
+            elif c.type == "image_url":
+                parts.append({"type": "input_image", "image_url": c.image_url})
+        return parts if parts else ""
+    return ""
+
+
 def ir_to_responses(ir: IRRequest, stream: bool = False) -> dict[str, Any]:
-    # 抽取所有 system 合并为 instructions，保留多条 system 的语义
+    # 抽取所有 system 合并为 instructions；其余走 IRItem，避免往 IRMessage 塞字段
     instructions_parts: list[str] = []
-    input_msgs: list[dict[str, Any]] = []
     for m in ir.messages:
-        if m.role == "system":
-            if isinstance(m.content, str):
-                instructions_parts.append(m.content)
-            elif isinstance(m.content, list):
-                instructions_parts.append(" ".join(c.text or "" for c in m.content if c.type == "text"))
+        if m.role != "system":
             continue
-        if m.role == "tool":
-            txt = m.content if isinstance(m.content, str) else "".join(c.text or "" for c in (m.content or []) if isinstance(c, IRContent))
-            input_msgs.append({"type": "function_call_output", "call_id": m.tool_call_id or "", "output": txt or ""})
-            continue
-        # 转换 content
         if isinstance(m.content, str):
-            content = m.content
+            instructions_parts.append(m.content)
         elif isinstance(m.content, list):
-            parts = []
-            for c in m.content:
-                if c.type == "text":
-                    parts.append({"type": "input_text", "text": c.text or ""})
-                elif c.type == "image_url":
-                    parts.append({"type": "input_image", "image_url": c.image_url})
-            content = parts if parts else ""
-        else:
-            content = ""
-        entry: dict[str, Any] = {"role": m.role, "content": content}
-        if m.tool_calls:
-            # responses 用单独的 function_call 项追加
-            input_msgs.append(entry)
-            for tc in m.tool_calls:
-                input_msgs.append({"type": "function_call", "call_id": tc.id, "name": tc.name, "arguments": tc.arguments})
+            instructions_parts.append(" ".join(c.text or "" for c in m.content if c.type == "text"))
+    input_msgs: list[dict[str, Any]] = []
+    for it in ir.ensure_items():
+        if it.type == "function_call":
+            input_msgs.append({"type": "function_call", "call_id": it.call_id or "", "name": it.name or "", "arguments": it.arguments or "{}"})
             continue
+        if it.type == "function_call_output":
+            txt = it.output if it.output is not None else _item_content(it.content)
+            if not isinstance(txt, str):
+                txt = json.dumps(txt, ensure_ascii=False) if txt else ""
+            input_msgs.append({"type": "function_call_output", "call_id": it.call_id or "", "output": txt or ""})
+            continue
+        if it.type == "reasoning":
+            input_msgs.append({"type": "reasoning", "summary": [{"type": "summary_text", "text": it.reasoning or ""}]})
+            continue
+        entry: dict[str, Any] = {"role": it.role or "user", "content": _item_content(it.content)}
         input_msgs.append(entry)
     instructions = "\n".join(instructions_parts) if instructions_parts else None
 
