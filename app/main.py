@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,47 @@ from fastapi.staticfiles import StaticFiles
 from . import __version__
 from .config import config_manager
 from .server import manage_router, proxy_router
+
+ASGIApp = Callable[[dict, Callable, Callable], Awaitable[None]]
+Message = dict
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class BodySizeLimitMiddleware:
+    """限制请求体大小；无 Content-Length（chunked）时按实际接收字节累计校验。"""
+
+    def __init__(self, app: ASGIApp, max_body: int):
+        self.app = app
+        self.max_body = max_body
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        detail = {"detail": f"请求体过大，限制 {self.max_body} bytes"}
+        headers = dict(scope.get("headers") or [])
+        cl = headers.get(b"content-length")
+        if cl and cl.isdigit() and int(cl) > self.max_body:
+            await JSONResponse(detail, status_code=413)(scope, receive, send)
+            return
+        total = 0
+
+        async def wrapped_receive() -> Message:
+            nonlocal total
+            msg = await receive()
+            if msg["type"] == "http.request":
+                total += len(msg.get("body") or b"")
+                if total > self.max_body:
+                    raise _BodyTooLarge()
+            return msg
+
+        try:
+            await self.app(scope, wrapped_receive, send)
+        except _BodyTooLarge:
+            await JSONResponse(detail, status_code=413)(scope, receive, send)
 
 
 @asynccontextmanager
@@ -35,6 +77,9 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    max_body = int(os.getenv("UR_MAX_BODY", str(4 * 1024 * 1024)))
+    app.add_middleware(BodySizeLimitMiddleware, max_body=max_body)
+
     allowed_origins = [o.strip() for o in os.getenv("UR_CORS_ORIGINS", "").split(",") if o.strip()]
     if allowed_origins:
         app.add_middleware(
@@ -52,15 +97,6 @@ def create_app() -> FastAPI:
             "version": __version__,
             "providers": len(cfg.providers),
         }
-
-    max_body = int(os.getenv("UR_MAX_BODY", str(4 * 1024 * 1024)))
-
-    @app.middleware("http")
-    async def limit_body_size(request, call_next):
-        cl = request.headers.get("content-length")
-        if cl and cl.isdigit() and int(cl) > max_body:
-            return JSONResponse({"detail": f"请求体过大，限制 {max_body} bytes"}, status_code=413)
-        return await call_next(request)
 
     app.include_router(manage_router)
     app.include_router(proxy_router)

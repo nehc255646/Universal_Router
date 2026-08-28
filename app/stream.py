@@ -4,7 +4,8 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from .converter.common import parse_sse_line, sse_format
 from .upstream import UpstreamHTTPError
@@ -66,133 +67,152 @@ def _usage_event(usage: Any) -> dict[str, Any] | None:
     return {"kind": "usage", "prompt_tokens": int(prompt or 0), "completion_tokens": int(completion or 0)}
 
 
-def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, Any]]:
-    """归一化为内部事件: text / reasoning / tool_start / tool_args / finish / error / usage / done"""
-    if data.get("__done"):
-        return [{"kind": "done"}]
+def _error_event(data: dict[str, Any], upstream_mode: str) -> list[dict[str, Any]] | None:
     t = data.get("type")
     if t == "error" or (isinstance(data.get("error"), (dict, str)) and not data.get("choices") and t not in ("message_delta", "content_block_delta")):
         if t == "error" or (isinstance(data.get("error"), (dict, str)) and upstream_mode != "chat_completions"):
             return [{"kind": "error", "error": data.get("error") or data}]
         if "error" in data and not data.get("choices") and not t:
             return [{"kind": "error", "error": data.get("error") or data}]
+    return None
 
+
+def _events_chat(data: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    if upstream_mode == "chat_completions":
-        if data.get("error") and not data.get("choices"):
-            return [{"kind": "error", "error": data["error"]}]
-        usage = _usage_event(data.get("usage"))
-        choices = data.get("choices") or []
-        if not choices:
-            return [usage] if usage else out
-        ch = choices[0]
-        delta = ch.get("delta") or {}
-        if delta.get("content"):
-            out.append({"kind": "text", "text": delta["content"]})
-        if delta.get("refusal"):
-            out.append({"kind": "text", "text": delta["refusal"]})
-        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking")
-        if reasoning:
-            out.append({"kind": "reasoning", "text": reasoning})
-        for tc in delta.get("tool_calls") or []:
-            idx = tc.get("index", 0)
-            fn = tc.get("function") or {}
-            if tc.get("id") or fn.get("name"):
-                out.append({"kind": "tool_start", "index": idx, "id": tc.get("id") or "", "name": fn.get("name") or ""})
-            if fn.get("arguments"):
-                out.append({"kind": "tool_args", "index": idx, "arguments": fn["arguments"]})
-        if ch.get("finish_reason"):
-            out.append({"kind": "finish", "reason": ch["finish_reason"]})
+    if data.get("error") and not data.get("choices"):
+        return [{"kind": "error", "error": data["error"]}]
+    usage = _usage_event(data.get("usage"))
+    choices = data.get("choices") or []
+    if not choices:
+        return [usage] if usage else out
+    ch = choices[0]
+    delta = ch.get("delta") or {}
+    if delta.get("content"):
+        out.append({"kind": "text", "text": delta["content"]})
+    if delta.get("refusal"):
+        out.append({"kind": "text", "text": delta["refusal"]})
+    reasoning = delta.get("reasoning_content") or delta.get("reasoning") or delta.get("thinking")
+    if reasoning:
+        out.append({"kind": "reasoning", "text": reasoning})
+    for tc in delta.get("tool_calls") or []:
+        idx = tc.get("index", 0)
+        fn = tc.get("function") or {}
+        if tc.get("id") or fn.get("name"):
+            out.append({"kind": "tool_start", "index": idx, "id": tc.get("id") or "", "name": fn.get("name") or ""})
+        if fn.get("arguments"):
+            out.append({"kind": "tool_args", "index": idx, "arguments": fn["arguments"]})
+    if ch.get("finish_reason"):
+        out.append({"kind": "finish", "reason": ch["finish_reason"]})
+    if usage:
+        out.append(usage)
+    return out
+
+
+def _events_responses(data: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    t = data.get("type")
+    if t in ("response.failed", "error"):
+        err = data.get("error") or (data.get("response") or {}).get("error") or data
+        return [{"kind": "error", "error": err}]
+    if t == "response.output_text.delta" or t == "response.refusal.delta":
+        if data.get("delta"):
+            out.append({"kind": "text", "text": data["delta"]})
+    elif t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
+        if data.get("delta"):
+            out.append({"kind": "reasoning", "text": data["delta"]})
+    elif t == "response.output_item.added":
+        item = data.get("item") or {}
+        idx = data.get("output_index", 0)
+        itype = item.get("type")
+        if itype == "reasoning":
+            summary = item.get("summary") or []
+            txt = ""
+            if isinstance(summary, list):
+                txt = "".join((s.get("text") if isinstance(s, dict) else str(s)) or "" for s in summary)
+            elif isinstance(summary, str):
+                txt = summary
+            if txt:
+                out.append({"kind": "reasoning", "text": txt})
+        elif itype == "function_call":
+            out.append(
+                {
+                    "kind": "tool_start",
+                    "index": idx,
+                    "id": item.get("call_id") or item.get("id") or "",
+                    "name": item.get("name") or "",
+                }
+            )
+            if item.get("arguments"):
+                out.append({"kind": "tool_args", "index": idx, "arguments": item["arguments"]})
+    elif t == "response.function_call_arguments.delta":
+        out.append({"kind": "tool_args", "index": data.get("output_index", 0), "arguments": data.get("delta") or ""})
+    elif t in ("response.completed", "response.incomplete"):
+        resp = data.get("response") or {}
+        status = resp.get("status")
+        reason = "stop"
+        if t == "response.incomplete" or status == "incomplete":
+            reason = "length"
+        out_items = resp.get("output") or []
+        if any(isinstance(x, dict) and x.get("type") == "function_call" for x in out_items):
+            reason = "tool_calls"
+        out.append({"kind": "finish", "reason": reason})
+        usage = _usage_event(resp.get("usage"))
         if usage:
             out.append(usage)
-        return out
-
-    if upstream_mode == "responses":
-        if t in ("response.failed", "error"):
-            err = data.get("error") or (data.get("response") or {}).get("error") or data
-            return [{"kind": "error", "error": err}]
-        if t == "response.output_text.delta" or t == "response.refusal.delta":
-            if data.get("delta"):
-                out.append({"kind": "text", "text": data["delta"]})
-        elif t in ("response.reasoning_summary_text.delta", "response.reasoning_text.delta"):
-            if data.get("delta"):
-                out.append({"kind": "reasoning", "text": data["delta"]})
-        elif t == "response.output_item.added":
-            item = data.get("item") or {}
-            idx = data.get("output_index", 0)
-            itype = item.get("type")
-            if itype == "reasoning":
-                summary = item.get("summary") or []
-                txt = ""
-                if isinstance(summary, list):
-                    txt = "".join((s.get("text") if isinstance(s, dict) else str(s)) or "" for s in summary)
-                elif isinstance(summary, str):
-                    txt = summary
-                if txt:
-                    out.append({"kind": "reasoning", "text": txt})
-            elif itype == "function_call":
-                out.append(
-                    {
-                        "kind": "tool_start",
-                        "index": idx,
-                        "id": item.get("call_id") or item.get("id") or "",
-                        "name": item.get("name") or "",
-                    }
-                )
-                if item.get("arguments"):
-                    out.append({"kind": "tool_args", "index": idx, "arguments": item["arguments"]})
-        elif t == "response.function_call_arguments.delta":
-            out.append({"kind": "tool_args", "index": data.get("output_index", 0), "arguments": data.get("delta") or ""})
-        elif t in ("response.completed", "response.incomplete"):
-            resp = data.get("response") or {}
-            status = resp.get("status")
-            reason = "stop"
-            if t == "response.incomplete" or status == "incomplete":
-                reason = "length"
-            out_items = resp.get("output") or []
-            if any(isinstance(x, dict) and x.get("type") == "function_call" for x in out_items):
-                reason = "tool_calls"
-            out.append({"kind": "finish", "reason": reason})
-            usage = _usage_event(resp.get("usage"))
-            if usage:
-                out.append(usage)
-        return out
-
-    if upstream_mode == "messages":
-        if t == "content_block_start":
-            block = data.get("content_block") or {}
-            idx = data.get("index", 0)
-            if block.get("type") == "tool_use":
-                out.append({"kind": "tool_start", "index": idx, "id": block.get("id") or "", "name": block.get("name") or ""})
-                inp = block.get("input")
-                if inp:
-                    out.append({"kind": "tool_args", "index": idx, "arguments": json.dumps(inp, ensure_ascii=False)})
-            elif block.get("type") in ("thinking", "redacted_thinking"):
-                thought = block.get("thinking") or ""
-                if thought:
-                    out.append({"kind": "reasoning", "text": thought})
-        elif t == "content_block_delta":
-            d = data.get("delta") or {}
-            if d.get("type") == "text_delta" and d.get("text"):
-                out.append({"kind": "text", "text": d["text"]})
-            elif d.get("type") == "thinking_delta":
-                txt = d.get("thinking") or d.get("text") or ""
-                if txt:
-                    out.append({"kind": "reasoning", "text": txt})
-            elif d.get("type") == "input_json_delta" and d.get("partial_json"):
-                out.append({"kind": "tool_args", "index": data.get("index", 0), "arguments": d["partial_json"]})
-        elif t == "message_delta":
-            stop = (data.get("delta") or {}).get("stop_reason")
-            if stop:
-                out.append({"kind": "finish", "reason": _finish_from_anthropic(stop)})
-            usage = _usage_event(data.get("usage"))
-            if usage:
-                out.append(usage)
-        elif t == "error":
-            out.append({"kind": "error", "error": data.get("error") or data})
-        return out
-
     return out
+
+
+def _events_messages(data: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    t = data.get("type")
+    if t == "content_block_start":
+        block = data.get("content_block") or {}
+        idx = data.get("index", 0)
+        if block.get("type") == "tool_use":
+            out.append({"kind": "tool_start", "index": idx, "id": block.get("id") or "", "name": block.get("name") or ""})
+            inp = block.get("input")
+            if inp:
+                out.append({"kind": "tool_args", "index": idx, "arguments": json.dumps(inp, ensure_ascii=False)})
+        elif block.get("type") in ("thinking", "redacted_thinking"):
+            thought = block.get("thinking") or ""
+            if thought:
+                out.append({"kind": "reasoning", "text": thought})
+    elif t == "content_block_delta":
+        d = data.get("delta") or {}
+        if d.get("type") == "text_delta" and d.get("text"):
+            out.append({"kind": "text", "text": d["text"]})
+        elif d.get("type") == "thinking_delta":
+            txt = d.get("thinking") or d.get("text") or ""
+            if txt:
+                out.append({"kind": "reasoning", "text": txt})
+        elif d.get("type") == "input_json_delta" and d.get("partial_json"):
+            out.append({"kind": "tool_args", "index": data.get("index", 0), "arguments": d["partial_json"]})
+    elif t == "message_delta":
+        stop = (data.get("delta") or {}).get("stop_reason")
+        if stop:
+            out.append({"kind": "finish", "reason": _finish_from_anthropic(stop)})
+        usage = _usage_event(data.get("usage"))
+        if usage:
+            out.append(usage)
+    elif t == "error":
+        out.append({"kind": "error", "error": data.get("error") or data})
+    return out
+
+
+def _extract_events(data: dict[str, Any], upstream_mode: str) -> list[dict[str, Any]]:
+    """归一化为内部事件: text / reasoning / tool_start / tool_args / finish / error / usage / done"""
+    if data.get("__done"):
+        return [{"kind": "done"}]
+    err = _error_event(data, upstream_mode)
+    if err is not None:
+        return err
+    if upstream_mode == "chat_completions":
+        return _events_chat(data)
+    if upstream_mode == "responses":
+        return _events_responses(data)
+    if upstream_mode == "messages":
+        return _events_messages(data)
+    return []
 
 
 async def _iter_normalized(upstream_mode: str, raw: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:

@@ -19,6 +19,7 @@
 - 流式：connect / 首字节 / 空闲读超时；跨协议复刻 Responses 事件生命周期与 tool call 分片
 - Web 管理页：提供商 CRUD、预设、拉取模型、连通测试、试聊、持久化请求日志（含 token）
 - 入站鉴权；`/api/*` 管理接口在非本机绑定时强制鉴权；密钥支持 `env:NAME`
+- 请求体上限（含 chunked），客户端断连自动取消上游请求
 - 模型路由支持 `model` 或 `provider/model`
 
 ```
@@ -34,8 +35,8 @@ Windows：双击 `start.bat` 启动网关，再用 `入口.url` 打开管理页�
 macOS / Linux：
 
 ```bash
-chmod +x 启动.sh
-./启动.sh
+chmod +x start.sh
+./start.sh
 ```
 
 或手动：
@@ -48,6 +49,14 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
 ```
 
 打开 http://127.0.0.1:8787/ 添加提供商。网关地址为 http://127.0.0.1:8787/v1 。
+
+Docker：
+
+```bash
+docker compose up -d --build
+```
+
+配置与请求日志通过卷挂载持久化；绑定 0.0.0.0 时务必设置 admin_api_key 或 local_api_key。
 
 ## 接入示例
 

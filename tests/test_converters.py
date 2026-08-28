@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.converter.chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
 from app.converter.chat_responses import chat_to_ir, ir_response_to_chat, ir_to_chat, ir_to_responses, responses_to_ir
-from app.converter.extras import take_extras, CHAT_PASSTHROUGH
+from app.converter.extras import CHAT_PASSTHROUGH, take_extras
 from app.ir import IRResponse, IRToolCall
 
 

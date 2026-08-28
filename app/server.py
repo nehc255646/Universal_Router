@@ -1,4 +1,4 @@
-"""管理 API + 代理 API"""
+﻿"""管理 API + 代理 API"""
 from __future__ import annotations
 
 import asyncio
@@ -11,7 +11,8 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from . import __version__, access_log, health as provider_health
+from . import __version__, access_log
+from . import health as provider_health
 from .config import (
     ProviderConfig,
     apply_incoming_key,
@@ -21,8 +22,6 @@ from .config import (
     provider_public_dict,
     server_public_dict,
 )
-from .router import is_retryable_status, resolve_providers
-from .secrets import collect_secrets, redact, redact_any
 from .converter.chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
 from .converter.chat_responses import (
     chat_to_ir,
@@ -32,7 +31,10 @@ from .converter.chat_responses import (
     ir_to_responses,
     responses_to_ir,
 )
+from .converter.common import sse_format as _sse
 from .ir import IRResponse, IRToolCall
+from .router import is_retryable_status, resolve_providers
+from .secrets import collect_secrets, redact, redact_any
 from .stream import convert_stream
 from .upstream import StreamTimeoutError, UpstreamHTTPError, fetch_upstream_models, post_non_stream, stream_upstream
 
@@ -127,7 +129,7 @@ async def update_config(body: dict[str, Any]):
         srv = apply_incoming_server(srv, config_manager.config.server)
         new_srv = ServerConfig.model_validate(srv)
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     config_manager.config.server = new_srv
     await config_manager.save()
     return {"server": server_public_dict(new_srv)}
@@ -144,7 +146,7 @@ async def create_provider(body: dict[str, Any]):
     try:
         p = ProviderConfig.model_validate(body)
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     if config_manager.find_provider(p.id):
         raise HTTPException(409, f"provider id '{p.id}' 已存在")
     config_manager.config.providers.append(p)
@@ -163,7 +165,7 @@ async def update_provider(pid: str, body: dict[str, Any]):
     try:
         p = ProviderConfig.model_validate(body)
     except Exception as e:
-        raise HTTPException(400, str(e))
+        raise HTTPException(400, str(e)) from e
     if p.id != pid and config_manager.find_provider(p.id):
         raise HTTPException(409, f"provider id '{p.id}' 已存在")
     config_manager.config.providers[idx] = p
@@ -446,28 +448,83 @@ async def list_models():
     return {"object": "list", "data": config_manager.all_models()}
 
 
-async def _handle_proxy(inbound: str, request: Request):
-    _auth_check(request)
-    t0 = time.perf_counter()
-    model = ""
-    provider_id = None
-    stream = False
+async def _watch_disconnect(request: Request, interval: float = 0.5) -> bool:
+    """轮询客户端断连；返回 True 表示已断开。"""
+    while True:
+        if await request.is_disconnected():
+            return True
+        await asyncio.sleep(interval)
+
+
+async def _post_with_disconnect_watch(
+    client: httpx.AsyncClient,
+    provider: ProviderConfig,
+    upstream_body: dict[str, Any],
+    timeout: float,
+    request: Request,
+) -> tuple[int, dict[str, Any] | bytes] | None:
+    """非流式上游调用；客户端断连时取消上游请求，返回 None。"""
+    task = asyncio.create_task(post_non_stream(client, provider, upstream_body, timeout=timeout))
+    watch = asyncio.create_task(_watch_disconnect(request))
+    try:
+        done, _ = await asyncio.wait({task, watch}, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        task.cancel()
+        watch.cancel()
+        raise
+    if task not in done:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        return None
+    watch.cancel()
+    return task.result()
+
+
+async def _parse_proxy_request(inbound: str, request: Request) -> tuple[dict[str, Any], str, Any]:
     try:
         body = await request.json()
     except Exception:
         access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="invalid JSON")
-        raise HTTPException(400, "invalid JSON body")
-    model = body.get("model") or ""
+        raise HTTPException(400, "invalid JSON body") from None
+    if not isinstance(body, dict):
+        access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="invalid JSON")
+        raise HTTPException(400, "invalid JSON body") from None
+    model = str(body.get("model") or "")
     if not model:
         access_log.add(inbound=inbound, model="", provider_id=None, stream=False, status=400, latency_ms=0, error="missing model")
         raise HTTPException(400, "model 字段必填")
+    ir = _to_ir(inbound, body)
+    return body, model, ir
+
+
+async def _handle_proxy(inbound: str, request: Request):
+    _auth_check(request)
+    t0 = time.perf_counter()
+    body, model, ir = await _parse_proxy_request(inbound, request)
     candidates = resolve_providers(model)
     if not candidates:
         access_log.add(inbound=inbound, model=model, provider_id=None, stream=False, status=400, latency_ms=0, error="unknown model")
         raise HTTPException(400, f"未知 model '{model}'，请先在管理页配置提供商与模型")
-    ir = _to_ir(inbound, body)
-    stream = bool(body.get("stream"))
     client: httpx.AsyncClient = request.app.state.httpx_client
+    if not body.get("stream"):
+        return await _proxy_non_stream(inbound, request, client, ir, model, candidates, t0)
+    return _proxy_stream(inbound, client, ir, model, candidates, t0)
+
+
+async def _proxy_non_stream(
+    inbound: str,
+    request: Request,
+    client: httpx.AsyncClient,
+    ir: Any,
+    model: str,
+    candidates: list[ProviderConfig],
+    t0: float,
+):
     server = config_manager.config.server
     backoff = max(0, int(server.retry_backoff_ms)) / 1000.0
     extra_tries = int(server.retry_count)
@@ -479,160 +536,181 @@ async def _handle_proxy(inbound: str, request: Request):
             return True
         return bool(server.failover and pi < len(candidates) - 1)
 
-    if not stream:
-        last_status = 502
-        last_payload: Any = {"error": {"message": "all upstreams failed", "type": "upstream_error"}}
-        last_pid = candidates[0].id
-        attempts = 0
-        for pi, provider in enumerate(candidates):
-            upstream_body = _from_ir_to_upstream(ir, provider, stream=False)
-            n_tries = 1 + extra_tries
-            for attempt in range(n_tries):
-                attempts += 1
-                last_pid = provider.id
-                try:
-                    status, data = await post_non_stream(client, provider, upstream_body, timeout=provider.timeout_s)
-                except Exception as e:
-                    last_status = 502
-                    last_payload = {"error": {"message": redact(str(e), _secret_extras()), "type": "upstream_error"}}
-                    _record_fail(last_pid, str(e))
-                    if _can_retry(pi, attempt, n_tries, True):
-                        if backoff:
-                            await asyncio.sleep(backoff)
-                        continue
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=502, latency_ms=ms, error=str(e), attempts=attempts)
-                    return JSONResponse(content=last_payload, status_code=502, headers={"X-Universal-Router-Provider": last_pid})
-                if isinstance(data, bytes):
-                    text = data.decode(errors="ignore")
-                    last_status = status if status >= 400 else 502
-                    last_payload = {"error": redact(text[:2000] if status >= 400 else f"upstream 非 JSON: {text[:500]}", _secret_extras())}
-                    _record_fail(last_pid, text[:200])
-                    retryable = is_retryable_status(status) or status >= 500
-                    if _can_retry(pi, attempt, n_tries, retryable):
-                        if backoff:
-                            await asyncio.sleep(backoff)
-                        continue
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error=text[:200], attempts=attempts)
-                    return JSONResponse(content=last_payload, status_code=last_status)
-                if 200 <= status < 300:
-                    stripped = _strip_provider_prefix(model, provider)
-                    result = _upstream_resp_to_inbound(inbound, provider.upstream_mode, data, stripped)
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    usage = result.get("usage") if isinstance(result, dict) else None
-                    if not isinstance(usage, dict) and isinstance(data, dict):
-                        usage = _usage_openai(data.get("usage"))
-                    pt = int((usage or {}).get("prompt_tokens") or (usage or {}).get("input_tokens") or 0)
-                    ct = int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0)
-                    _record_ok(provider, ms, {"prompt_tokens": pt, "completion_tokens": ct})
-                    access_log.add(
-                        inbound=inbound,
-                        model=model,
-                        provider_id=provider.id,
-                        stream=False,
-                        status=200,
-                        latency_ms=ms,
-                        attempts=attempts,
-                        prompt_tokens=pt or None,
-                        completion_tokens=ct or None,
-                    )
-                    return JSONResponse(content=result, headers={"X-Universal-Router-Provider": provider.id})
-                last_status = status
-                last_payload = _safe_error(data if isinstance(data, dict) else {"error": str(data)})
-                _record_fail(last_pid, str(data)[:200])
-                if _can_retry(pi, attempt, n_tries, is_retryable_status(status)):
+    last_status = 502
+    last_payload: Any = {"error": {"message": "all upstreams failed", "type": "upstream_error"}}
+    last_pid = candidates[0].id
+    attempts = 0
+    for pi, provider in enumerate(candidates):
+        upstream_body = _from_ir_to_upstream(ir, provider, stream=False)
+        n_tries = 1 + extra_tries
+        for attempt in range(n_tries):
+            attempts += 1
+            last_pid = provider.id
+            try:
+                result = await _post_with_disconnect_watch(client, provider, upstream_body, provider.timeout_s, request)
+            except Exception as e:
+                last_status = 502
+                last_payload = {"error": {"message": redact(str(e), _secret_extras()), "type": "upstream_error"}}
+                _record_fail(last_pid, str(e))
+                if _can_retry(pi, attempt, n_tries, True):
                     if backoff:
                         await asyncio.sleep(backoff)
                     continue
                 ms = int((time.perf_counter() - t0) * 1000)
-                access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=status, latency_ms=ms, error=str(data)[:200], attempts=attempts)
-                return JSONResponse(content=last_payload, status_code=status, headers={"X-Universal-Router-Provider": last_pid})
-        ms = int((time.perf_counter() - t0) * 1000)
-        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error="exhausted retries", attempts=attempts)
-        return JSONResponse(content=_safe_error(last_payload), status_code=last_status, headers={"X-Universal-Router-Provider": last_pid})
+                access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=502, latency_ms=ms, error=str(e), attempts=attempts)
+                return JSONResponse(content=last_payload, status_code=502, headers={"X-Universal-Router-Provider": last_pid})
+            if result is None:
+                ms = int((time.perf_counter() - t0) * 1000)
+                access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=499, latency_ms=ms, error="client disconnected", attempts=attempts)
+                return JSONResponse(content={"error": {"message": "client disconnected", "type": "client_disconnected"}}, status_code=499)
+            status, data = result
+            if isinstance(data, bytes):
+                text = data.decode(errors="ignore")
+                last_status = status if status >= 400 else 502
+                last_payload = {"error": redact(text[:2000] if status >= 400 else f"upstream 非 JSON: {text[:500]}", _secret_extras())}
+                _record_fail(last_pid, text[:200])
+                retryable = is_retryable_status(status) or status >= 500
+                if _can_retry(pi, attempt, n_tries, retryable):
+                    if backoff:
+                        await asyncio.sleep(backoff)
+                    continue
+                ms = int((time.perf_counter() - t0) * 1000)
+                access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error=text[:200], attempts=attempts)
+                return JSONResponse(content=last_payload, status_code=last_status)
+            if 200 <= status < 300:
+                stripped = _strip_provider_prefix(model, provider)
+                result_inbound = _upstream_resp_to_inbound(inbound, provider.upstream_mode, data, stripped)
+                ms = int((time.perf_counter() - t0) * 1000)
+                usage = result_inbound.get("usage") if isinstance(result_inbound, dict) else None
+                if not isinstance(usage, dict) and isinstance(data, dict):
+                    usage = _usage_openai(data.get("usage"))
+                pt = int((usage or {}).get("prompt_tokens") or (usage or {}).get("input_tokens") or 0)
+                ct = int((usage or {}).get("completion_tokens") or (usage or {}).get("output_tokens") or 0)
+                _record_ok(provider, ms, {"prompt_tokens": pt, "completion_tokens": ct})
+                access_log.add(
+                    inbound=inbound,
+                    model=model,
+                    provider_id=provider.id,
+                    stream=False,
+                    status=200,
+                    latency_ms=ms,
+                    attempts=attempts,
+                    prompt_tokens=pt or None,
+                    completion_tokens=ct or None,
+                )
+                return JSONResponse(content=result_inbound, headers={"X-Universal-Router-Provider": provider.id})
+            last_status = status
+            last_payload = _safe_error(data if isinstance(data, dict) else {"error": str(data)})
+            _record_fail(last_pid, str(data)[:200])
+            if _can_retry(pi, attempt, n_tries, is_retryable_status(status)):
+                if backoff:
+                    await asyncio.sleep(backoff)
+                continue
+            ms = int((time.perf_counter() - t0) * 1000)
+            access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=status, latency_ms=ms, error=str(data)[:200], attempts=attempts)
+            return JSONResponse(content=last_payload, status_code=status, headers={"X-Universal-Router-Provider": last_pid})
+    ms = int((time.perf_counter() - t0) * 1000)
+    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error="exhausted retries", attempts=attempts)
+    return JSONResponse(content=_safe_error(last_payload), status_code=last_status, headers={"X-Universal-Router-Provider": last_pid})
+
+
+def _proxy_stream(
+    inbound: str,
+    client: httpx.AsyncClient,
+    ir: Any,
+    model: str,
+    candidates: list[ProviderConfig],
+    t0: float,
+):
+    server = config_manager.config.server
+    backoff = max(0, int(server.retry_backoff_ms)) / 1000.0
+    extra_tries = int(server.retry_count)
+
+    def _can_retry(pi: int, attempt: int, n_tries: int, retryable: bool) -> bool:
+        if not retryable:
+            return False
+        if attempt < n_tries - 1:
+            return True
+        return bool(server.failover and pi < len(candidates) - 1)
 
     async def gen():
         attempts = 0
         last_err = "all upstreams failed"
         last_pid = candidates[0].id
-        for pi, provider in enumerate(candidates):
-            upstream_body = _from_ir_to_upstream(ir, provider, stream=True)
-            n_tries = 1 + extra_tries
-            for attempt in range(n_tries):
-                attempts += 1
-                last_pid = provider.id
-                try:
-                    raw = stream_upstream(client, provider, upstream_body, timeout=max(provider.timeout_s, 60))
-                    it = raw.__aiter__()
-                    first = await it.__anext__()
+        try:
+            for pi, provider in enumerate(candidates):
+                upstream_body = _from_ir_to_upstream(ir, provider, stream=True)
+                n_tries = 1 + extra_tries
+                for attempt in range(n_tries):
+                    attempts += 1
+                    last_pid = provider.id
+                    try:
+                        raw = stream_upstream(client, provider, upstream_body, timeout=max(provider.timeout_s, 60))
+                        it = raw.__aiter__()
+                        first = await it.__anext__()
 
-                    async def chained(first_chunk=first, iterator=it):
-                        yield first_chunk
-                        async for c in iterator:
-                            yield c
+                        async def chained(first_chunk=first, iterator=it):
+                            yield first_chunk
+                            async for c in iterator:
+                                yield c
 
-                    stripped = _strip_provider_prefix(model, provider)
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    _record_ok(provider, ms, None)
-                    access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
-                    async for chunk in convert_stream(inbound, provider.upstream_mode, chained(), stripped):
-                        yield chunk
-                    return
-                except StopAsyncIteration:
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    _record_ok(provider, ms, None)
-                    access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
-                    return
-                except StreamTimeoutError as e:
-                    last_err = str(e)
-                    _record_fail(last_pid, last_err)
-                    if e.kind == "first_token" and _can_retry(pi, attempt, n_tries, True):
-                        if backoff:
-                            await asyncio.sleep(backoff)
-                        continue
-                    from .converter.common import sse_format
-
-                    yield sse_format({"type": "error", "error": last_err, "timeout": e.kind})
-                    yield b"data: [DONE]\n\n"
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=504, latency_ms=ms, error=last_err[:200], attempts=attempts)
-                    return
-                except UpstreamHTTPError as e:
-                    last_err = redact(e.body.decode(errors="ignore")[:500] if e.body else str(e), _secret_extras())
-                    _record_fail(last_pid, last_err)
-                    retryable = is_retryable_status(e.status_code)
-                    if _can_retry(pi, attempt, n_tries, retryable):
-                        if backoff:
-                            await asyncio.sleep(backoff)
-                        continue
-                    from .converter.common import sse_format
-
-                    yield sse_format({"type": "error", "error": last_err, "status": e.status_code})
-                    yield b"data: [DONE]\n\n"
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=e.status_code, latency_ms=ms, error=last_err[:200], attempts=attempts)
-                    return
-                except Exception as e:
-                    last_err = redact(str(e), _secret_extras())
-                    _record_fail(last_pid, last_err)
-                    if _can_retry(pi, attempt, n_tries, True):
-                        if backoff:
-                            await asyncio.sleep(backoff)
-                        continue
-                    from .converter.common import sse_format
-
-                    yield sse_format({"type": "error", "error": last_err})
-                    yield b"data: [DONE]\n\n"
-                    ms = int((time.perf_counter() - t0) * 1000)
-                    access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
-                    return
-        from .converter.common import sse_format
-
-        yield sse_format({"type": "error", "error": last_err})
-        yield b"data: [DONE]\n\n"
-        ms = int((time.perf_counter() - t0) * 1000)
-        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                        stripped = _strip_provider_prefix(model, provider)
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        _record_ok(provider, ms, None)
+                        access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
+                        async for chunk in convert_stream(inbound, provider.upstream_mode, chained(), stripped):
+                            yield chunk
+                        return
+                    except StopAsyncIteration:
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        _record_ok(provider, ms, None)
+                        access_log.add(inbound=inbound, model=model, provider_id=provider.id, stream=True, status=200, latency_ms=ms, attempts=attempts)
+                        return
+                    except StreamTimeoutError as e:
+                        last_err = str(e)
+                        _record_fail(last_pid, last_err)
+                        if e.kind == "first_token" and _can_retry(pi, attempt, n_tries, True):
+                            if backoff:
+                                await asyncio.sleep(backoff)
+                            continue
+                        yield _sse({"type": "error", "error": last_err, "timeout": e.kind})
+                        yield b"data: [DONE]\n\n"
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=504, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                        return
+                    except UpstreamHTTPError as e:
+                        last_err = redact(e.body.decode(errors="ignore")[:500] if e.body else str(e), _secret_extras())
+                        _record_fail(last_pid, last_err)
+                        retryable = is_retryable_status(e.status_code)
+                        if _can_retry(pi, attempt, n_tries, retryable):
+                            if backoff:
+                                await asyncio.sleep(backoff)
+                            continue
+                        yield _sse({"type": "error", "error": last_err, "status": e.status_code})
+                        yield b"data: [DONE]\n\n"
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=e.status_code, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                        return
+                    except Exception as e:
+                        last_err = redact(str(e), _secret_extras())
+                        _record_fail(last_pid, last_err)
+                        if _can_retry(pi, attempt, n_tries, True):
+                            if backoff:
+                                await asyncio.sleep(backoff)
+                            continue
+                        yield _sse({"type": "error", "error": last_err})
+                        yield b"data: [DONE]\n\n"
+                        ms = int((time.perf_counter() - t0) * 1000)
+                        access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
+                        return
+            yield _sse({"type": "error", "error": last_err})
+            yield b"data: [DONE]\n\n"
+            ms = int((time.perf_counter() - t0) * 1000)
+            access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=502, latency_ms=ms, error=last_err[:200], attempts=attempts)
+        except asyncio.CancelledError:
+            ms = int((time.perf_counter() - t0) * 1000)
+            access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=True, status=499, latency_ms=ms, error="client disconnected", attempts=attempts)
+            raise
 
     return StreamingResponse(
         gen(),

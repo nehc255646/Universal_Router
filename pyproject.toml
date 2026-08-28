@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "universal-router"
-version = "0.4.0"
 description = "Universal Router — local Chat Completions / Responses / Messages protocol gateway"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
+dynamic = ["version"]
 dependencies = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
@@ -34,6 +34,20 @@ Repository = "https://github.com/nehc255646/Universal_Router"
 [tool.setuptools.packages.find]
 include = ["app*"]
 exclude = ["tests*", "static*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "app.__version__" }
+
+[tool.ruff]
+line-length = 160
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"static/**" = ["ALL"]
 
 [tool.uvicorn]
 host = "127.0.0.1"

@@ -2,12 +2,11 @@
 from __future__ import annotations
 
 import json
-import time
 import uuid
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall, messages_to_items
-from .common import extract_text
 from .extras import CHAT_PASSTHROUGH, RESPONSES_PASSTHROUGH, take_extras
 
 # ---------- helpers ----------

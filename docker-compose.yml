@@ -1,0 +1,19 @@
+services:
+  universal-router:
+    build: .
+    image: universal-router:latest
+    container_name: universal-router
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./config.json:/app/config.json
+      - ur-data:/app/data
+    environment:
+      - UR_CONFIG=/app/config.json
+      - UR_LOG_DB=/app/data/access.db
+      # 可选：设置管理员密钥（绑定 0.0.0.0 时强烈建议）
+      # - UR_CORS_ORIGINS=
+
+volumes:
+  ur-data:

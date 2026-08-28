@@ -1,5 +1,5 @@
 """Converter package — 三协议互转经 IR 中转"""
-from .common import parse_sse_line, sse_format
+from .chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
 from .chat_responses import (
     chat_to_ir,
     ir_response_to_chat,
@@ -8,7 +8,7 @@ from .chat_responses import (
     ir_to_responses,
     responses_to_ir,
 )
-from .chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
+from .common import parse_sse_line, sse_format
 
 __all__ = [
     "parse_sse_line",

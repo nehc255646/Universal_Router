@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
@@ -109,7 +110,7 @@ async def stream_upstream(
                     chunk = await aiter.__anext__()
             except StopAsyncIteration:
                 break
-            except asyncio.TimeoutError as e:
+            except TimeoutError as e:
                 kind = "first_token" if awaiting_first else "idle"
                 raise StreamTimeoutError(kind, float(limit or 0)) from e
             awaiting_first = False

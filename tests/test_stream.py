@@ -4,7 +4,7 @@ import asyncio
 import json
 
 from app.converter.common import parse_sse_line
-from app.stream import split_sse_buffer, to_chat_stream, _extract_events
+from app.stream import _extract_events, split_sse_buffer, to_chat_stream
 
 
 def test_parse_sse_variants():

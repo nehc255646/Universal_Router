@@ -6,7 +6,6 @@ import uuid
 from typing import Any
 
 from ..ir import IRContent, IRMessage, IRRequest, IRResponse, IRTool, IRToolCall, messages_to_items
-from .common import extract_text
 from .extras import ANTHROPIC_PASSTHROUGH, take_extras
 
 ANTHROPIC_VERSION = "2023-06-01"

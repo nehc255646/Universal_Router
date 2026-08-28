@@ -19,6 +19,7 @@ Use it to point clients that speak only one API (Cursor, ChatBox, Claude Code, y
 - Streaming: connect / first-token / idle-read timeouts; cross-protocol Responses event lifecycle and fragmented tool-call arguments
 - Web UI: provider CRUD, presets, fetch models, connectivity test, playground, persistent request logs (with tokens)
 - Inbound auth; `/api/*` is required when bound off-loopback; keys may be `env:NAME` references
+- Request body size limit (incl. chunked); client disconnects cancel upstream requests
 - Model routing accepts `model` or `provider/model`
 
 ```
@@ -34,8 +35,8 @@ Windows: double-click `start.bat` to start the gateway, then open `入口.url` f
 macOS / Linux:
 
 ```bash
-chmod +x 启动.sh
-./启动.sh
+chmod +x start.sh
+./start.sh
 ```
 
 Or manually:
@@ -48,6 +49,14 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8787
 ```
 
 Open http://127.0.0.1:8787/ and add a provider. The gateway base URL is http://127.0.0.1:8787/v1 .
+
+Docker:
+
+```bash
+docker compose up -d --build
+```
+
+Config and request logs are mounted as volumes; when binding 0.0.0.0 always set `admin_api_key` or `local_api_key`.
 
 ## Client examples
 

@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal
 
 State = Literal["closed", "open", "half_open"]
 
 _lock = threading.Lock()
-_stats: dict[str, "ProviderStats"] = {}
+_stats: dict[str, ProviderStats] = {}
 _ALPHA = 0.3
 
 
@@ -34,6 +34,16 @@ class ProviderStats:
 def reset_health() -> None:
     with _lock:
         _stats.clear()
+
+
+def prune(pids: list[str]) -> list[str]:
+    """删除不在 pids 中的统计条目（provider 已删除/重命名），返回被清理的 id。"""
+    with _lock:
+        known = set(pids)
+        stale = [k for k in _stats if k not in known]
+        for k in stale:
+            del _stats[k]
+        return stale
 
 
 def _get(pid: str) -> ProviderStats:
@@ -76,6 +86,7 @@ def snapshot(pid: str) -> dict[str, Any]:
 
 
 def all_snapshots(pids: list[str]) -> list[dict[str, Any]]:
+    prune(pids)
     return [snapshot(p) for p in pids]
 
 

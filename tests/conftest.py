@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from app import access_log, health as provider_health
+from app import access_log
+from app import health as provider_health
 from app.config import AppConfig, ConfigManager, config_manager
 from app.router import reset_rr
 
