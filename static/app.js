@@ -10,6 +10,7 @@ function app() {
     testResult: '',
     testing: false,
     healthOk: false,
+    version: '',
     gatewayUrl: 'http://127.0.0.1:8787/v1',
     serverCfg: { host:'127.0.0.1', port:8787, local_api_key:'', admin_api_key:'', retry_count:1, retry_backoff_ms:200, failover:true, route_strategy:'priority', log_retain:5000, connect_timeout_s:15, first_token_timeout_s:45, read_idle_timeout_s:90, circuit_breaker:true, circuit_fail_threshold:3, circuit_cooldown_s:30, has_local_api_key:false, has_admin_api_key:false },
     adminKey: localStorage.getItem('ur_admin_key') || '',
@@ -104,6 +105,10 @@ function app() {
       try {
         const r = await fetch('/health');
         this.healthOk = r.ok;
+        if (r.ok) {
+          const d = await r.json();
+          this.version = d.version || '';
+        }
       } catch { this.healthOk = false; }
     },
     modeLabel(m) {
