@@ -1,0 +1,20 @@
+*{font-variant-ligatures:common-ligatures}
+html{scrollbar-gutter:stable}
+body{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:#27272a;border-radius:999px}
+::-webkit-scrollbar-thumb:hover{background:#3f3f46}
+.custom-scroll{scrollbar-width:thin;scrollbar-color:#27272a transparent}
+input,select,textarea{color:#e4e4e7}
+input::placeholder,textarea::placeholder{color:#52525b}
+[x-cloak]{display:none !important}
+:focus-visible{outline:none}
+/* 玻璃拟态降级 */
+@supports not (backdrop-filter: blur(12px)){
+  header{ background:#080a0f !important }
+}
+/* 输入聚焦光晕更柔和 */
+input:focus,select:focus{box-shadow:0 0 0 0 transparent}
+/* 细微入场 */
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}

@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Universal Router — 本地协议转换网关</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+<link rel="stylesheet" href="style.css" />
+<script>
+tailwind.config={
+  darkMode:'class',
+  theme:{
+    extend:{
+      fontFamily:{ sans:['Inter','system-ui','sans-serif'], mono:['JetBrains Mono','monospace']},
+      animation:{ 'pulse-slow':'pulse 3s cubic-bezier(0.4,0,0.6,1) infinite' }
+    }
+  }
+}
+</script>
+</head>
+<body class="bg-[#080a0f] text-zinc-100 min-h-screen antialiased selection:bg-violet-500/30" x-data="app()" x-init="init()">
+<!-- 背景光斑 -->
+<div class="fixed inset-0 -z-10 overflow-hidden pointer-events-none">
+  <div class="absolute -top-[40%] -right-[25%] w-[900px] h-[700px] rounded-full blur-[140px] opacity-[0.12]" style="background: radial-gradient(ellipse at center, #7c3aed 0%, transparent 70%)"></div>
+  <div class="absolute top-[30%] -left-[20%] w-[800px] h-[600px] rounded-full blur-[130px] opacity-[0.08]" style="background: radial-gradient(ellipse at center, #4f46e5 0%, transparent 70%)"></div>
+  <div class="absolute bottom-0 left-1/2 -translate-x-1/2 w-[1200px] h-[400px] rounded-full blur-[100px] opacity-[0.05]" style="background: radial-gradient(ellipse at center, #06b6d4 0%, transparent 70%)"></div>
+</div>
+
+<!-- Header -->
+<header class="sticky top-0 z-30 backdrop-blur-xl bg-[#080a0f]/70 border-b border-zinc-800/60">
+  <div class="max-w-[1320px] mx-auto px-6 lg:px-8 h-[64px] flex items-center justify-between gap-4">
+    <div class="flex items-center gap-4">
+      <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-violet-600 via-indigo-600 to-violet-700 flex items-center justify-center font-bold text-sm tracking-widest shadow-lg shadow-violet-600/20 ring-1 ring-white/10">UR</div>
+      <div class="leading-tight">
+        <div class="font-semibold text-[15px] tracking-tight flex items-center gap-2">Universal Router <span class="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-violet-500/15 text-violet-300 ring-1 ring-violet-500/20">v0.1</span></div>
+        <div class="text-[12px] text-zinc-400 hidden sm:block">三协议互转 · 本地网关 · 零延迟</div>
+      </div>
+      <div class="hidden lg:flex items-center gap-2 ml-6 pl-6 border-l border-zinc-800/60">
+        <span class="relative flex h-2.5 w-2.5">
+          <span x-show="healthOk" class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+          <span class="relative inline-flex rounded-full h-2.5 w-2.5" :class="healthOk ? 'bg-emerald-500 shadow shadow-emerald-500/30' : 'bg-zinc-600'"></span>
+        </span>
+        <span class="text-xs font-medium" :class="healthOk ? 'text-emerald-300' : 'text-zinc-500'" x-text="healthOk ? '运行中' : '未连接'"></span>
+        <span class="text-xs text-zinc-600 ml-1 hidden xl:inline" x-text="healthOk ? '· 监听 '+serverCfg.host+':'+serverCfg.port : ''"></span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 sm:gap-3">
+      <div class="group flex items-center gap-2 pl-3 pr-1 py-1 rounded-full bg-zinc-900/80 border border-zinc-800 hover:border-zinc-700 transition backdrop-blur">
+        <span class="w-1.5 h-1.5 rounded-full bg-violet-500 hidden sm:block"></span>
+        <span class="font-mono text-xs text-zinc-300 max-w-[150px] sm:max-w-none truncate" x-text="gatewayUrl"></span>
+        <button @click="copy(gatewayUrl)" class="w-7 h-7 rounded-full bg-zinc-800 group-hover:bg-zinc-700 flex items-center justify-center transition" title="复制地址">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-zinc-400"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v3"/></svg>
+        </button>
+      </div>
+      <a href="https://github.com" target="_blank" class="hidden sm:flex w-8 h-8 rounded-full bg-zinc-900 border border-zinc-800 items-center justify-center hover:border-zinc-700 transition text-zinc-500 hover:text-zinc-300">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.3 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577v-2.165c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.73.083-.73 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.108-.775.418-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.468-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22v3.293c0 .319.192.694.801.576C20.566 21.797 24 17.3 24 12c0-6.63-5.37-12-12-12z"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<div class="max-w-[1320px] mx-auto px-4 sm:px-6 lg:px-8 py-6 lg:py-8 grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 items-start">
+  <!-- 左侧 -->
+  <div class="space-y-4 lg:sticky lg:top-[88px]">
+    <!-- 网关设置卡 -->
+    <div class="rounded-2xl bg-zinc-900/50 backdrop-blur border border-zinc-800/80 overflow-hidden">
+      <div class="px-4 py-3 flex items-center justify-between border-b border-zinc-800/50">
+        <div class="flex items-center gap-2">
+          <span class="w-6 h-6 rounded-lg bg-zinc-800 flex items-center justify-center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-zinc-400"><path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z"/><path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/></svg></span>
+          <span class="text-sm font-medium">网关设置</span>
+        </div>
+        <span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20">重启生效</span>
+      </div>
+      <div class="p-4 space-y-3">
+        <div class="grid grid-cols-[1fr_110px] gap-3">
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">监听 Host</span>
+            <input x-model="serverCfg.host" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 transition" />
+          </label>
+          <label class="block">
+            <span class="text-[11px] font-medium text-zinc-400">端口</span>
+            <input x-model.number="serverCfg.port" type="number" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 transition" />
+          </label>
+        </div>
+        <label class="block">
+          <span class="text-[11px] font-medium text-zinc-400">本地鉴权 Key</span>
+          <div class="mt-1 flex gap-2">
+            <div class="relative flex-1">
+              <input :type="showLocalKey?'text':'password'" x-model="serverCfg.local_api_key" placeholder="为空则不鉴权 · sk-local-..." class="w-full bg-zinc-950/70 border border-zinc-800 rounded-lg pl-3 pr-9 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/20 transition" />
+              <span class="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 17a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/><path d="M9 9V7a3 3 0 0 1 6 0v2"/><rect x="7" y="9" width="10" height="10" rx="2"/></svg></span>
+            </div>
+            <button @click="showLocalKey=!showLocalKey" class="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition min-w-[56px]" x-text="showLocalKey?'隐藏':'显示'"></button>
+          </div>
+          <span class="text-[11px] text-zinc-500">留空为本地可信模式；填写后入站需 Bearer 匹配</span>
+        </label>
+        <button @click="saveServer()" class="w-full mt-1 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-medium shadow-lg shadow-violet-600/20 transition flex items-center justify-center gap-2">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+          保存网关设置
+        </button>
+      </div>
+    </div>
+
+    <!-- 提供商列表 -->
+    <div class="rounded-2xl bg-zinc-900/50 backdrop-blur border border-zinc-800/80 overflow-hidden">
+      <div class="px-4 py-3 flex items-center justify-between">
+        <h2 class="text-sm font-semibold flex items-center gap-2"><span class="w-1.5 h-6 rounded-full bg-violet-500"></span>供应商 <span class="text-xs font-normal text-zinc-500 ml-1" x-text="'· '+providers.length"></span></h2>
+        <button @click="addProvider()" class="inline-flex items-center gap-1 px-3 py-1.5 rounded-full bg-violet-600 hover:bg-violet-500 text-xs font-medium shadow shadow-violet-600/20 transition">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          添加
+        </button>
+      </div>
+      <div class="px-3 pb-3 space-y-2 max-h-[52vh] overflow-auto custom-scroll">
+        <template x-for="p in providers" :key="p.id">
+          <div @click="select(p.id)" :class="selectedId===p.id ? 'bg-zinc-800 border-violet-500/40 shadow shadow-violet-500/10 ring-1 ring-violet-500/20' : 'bg-zinc-950/40 border-zinc-800 hover:bg-zinc-800/60 hover:border-zinc-700'" class="group p-3.5 rounded-xl border cursor-pointer transition">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2">
+                  <span class="font-mono text-sm font-semibold truncate" x-text="p.id"></span>
+                  <span class="shrink-0 text-[10px] px-1.5 py-0.5 rounded-full font-medium" :class="{'chat_completions':'bg-sky-500/15 text-sky-300 ring-1 ring-sky-500/20','responses':'bg-emerald-500/15 text-emerald-300 ring-1 ring-emerald-500/20','messages':'bg-amber-500/15 text-amber-300 ring-1 ring-amber-500/20'}[p.upstream_mode] || 'bg-zinc-700 text-zinc-300'" x-text="modeLabel(p.upstream_mode)"></span>
+                </div>
+                <div class="text-xs text-zinc-400 truncate mt-0.5" x-text="p.display_name || '未命名提供商'"></div>
+                <div class="text-[11px] text-zinc-500 truncate flex items-center gap-1 mt-1"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> <span x-text="p.base_url"></span></div>
+                <div class="flex items-center gap-1.5 mt-2">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500" x-text="p.models.length+' 模型'"></span>
+                  <span x-show="p.api_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">已配置 Key</span>
+                </div>
+              </div>
+              <span class="w-1.5 h-1.5 rounded-full mt-2 shrink-0" :class="selectedId===p.id ? 'bg-violet-500' : 'bg-zinc-700 group-hover:bg-zinc-600'"></span>
+            </div>
+          </div>
+        </template>
+        <div x-show="providers.length===0" class="text-center py-10">
+          <div class="w-12 h-12 rounded-2xl bg-zinc-800 flex items-center justify-center mx-auto mb-3"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#71717a" stroke-width="1.5"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg></div>
+          <div class="text-sm text-zinc-400">暂无提供商</div>
+          <div class="text-xs text-zinc-600 mt-1">添加一个上游以开始转发</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 右侧主面板 -->
+  <main class="rounded-2xl bg-zinc-900/50 backdrop-blur border border-zinc-800/80 overflow-hidden min-h-[620px] flex flex-col">
+    <!-- 空状态 -->
+    <template x-if="!selected">
+      <div class="flex-1 flex flex-col items-center justify-center p-8 lg:p-12 text-center">
+        <div class="w-20 h-20 rounded-3xl bg-gradient-to-br from-violet-600/20 to-indigo-600/20 border border-violet-500/20 flex items-center justify-center mb-6">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg>
+        </div>
+        <h3 class="text-lg font-semibold">选择或创建一个提供商</h3>
+        <p class="text-sm text-zinc-400 mt-2 max-w-[420px] leading-relaxed">在左侧添加你的上游 AI 提供商（OpenAI / Anthropic / 中转站），配置模型与鉴权后，本地 <span class="font-mono text-violet-300" x-text="gatewayUrl"></span> 即可作为统一入口对外提供三协议互转。</p>
+        <button @click="addProvider()" class="mt-6 px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-sm font-medium shadow-lg shadow-violet-600/20 transition">+ 创建首个提供商</button>
+        <div class="mt-8 grid grid-cols-3 gap-3 w-full max-w-[560px] text-left">
+          <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800">
+            <div class="text-xs font-medium text-sky-300">chat</div>
+            <div class="text-[11px] text-zinc-500 mt-1">/v1/chat/completions</div>
+          </div>
+          <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800">
+            <div class="text-xs font-medium text-emerald-300">responses</div>
+            <div class="text-[11px] text-zinc-500 mt-1">/v1/responses</div>
+          </div>
+          <div class="p-3 rounded-xl bg-zinc-950/50 border border-zinc-800">
+            <div class="text-xs font-medium text-amber-300">messages</div>
+            <div class="text-[11px] text-zinc-500 mt-1">/v1/messages</div>
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <template x-if="selected">
+      <div class="flex-1 flex flex-col">
+        <!-- 顶栏 -->
+        <div class="px-6 py-4 border-b border-zinc-800/60 flex items-center justify-between gap-4 bg-zinc-950/30">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2">
+              <h2 class="font-semibold truncate" x-text="form.display_name || form.id || '未命名'"></h2>
+              <span class="text-xs px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 font-mono" x-text="form.id || '—'"></span>
+            </div>
+            <div class="text-xs text-zinc-500 truncate mt-0.5" x-text="form.base_url || '未配置 Base URL'"></div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <span class="hidden sm:inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border" :class="{'chat_completions':'bg-sky-500/10 text-sky-300 border-sky-500/20','responses':'bg-emerald-500/10 text-emerald-300 border-emerald-500/20','messages':'bg-amber-500/10 text-amber-300 border-amber-500/20'}[form.upstream_mode] || 'bg-zinc-800 text-zinc-400 border-zinc-700'">
+              <span class="w-1.5 h-1.5 rounded-full" :class="{'chat_completions':'bg-sky-400','responses':'bg-emerald-400','messages':'bg-amber-400'}[form.upstream_mode]"></span>
+              <span x-text="modeLabel(form.upstream_mode)"></span>
+            </span>
+          </div>
+        </div>
+
+        <div class="flex-1 p-6 space-y-6 overflow-auto custom-scroll">
+          <!-- 基础信息 -->
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <label class="block group">
+              <span class="text-xs font-medium text-zinc-300 flex items-center gap-1">提供商 ID <span class="text-red-400">*</span> <span class="ml-auto text-[11px] font-normal text-zinc-500 hidden group-focus-within:block">a-z 0-9 - _</span></span>
+              <input x-model="form.id" placeholder="my-provider" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-300">显示名称</span>
+              <input x-model="form.display_name" placeholder="我的 AI 提供商" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+            </label>
+          </div>
+
+          <label class="block">
+            <span class="text-xs font-medium text-zinc-300 flex items-center gap-1.5">基础 URL <span class="text-red-400">*</span> <span class="ml-1 w-1.5 h-1.5 rounded-full bg-emerald-500/60"></span></span>
+            <div class="mt-1.5 relative">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg></span>
+              <input x-model="form.base_url" placeholder="https://api.openai.com/v1" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl pl-9 pr-3.5 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+            </div>
+          </label>
+
+          <div class="grid grid-cols-1 md:grid-cols-[1fr_160px] gap-4">
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-300">API 密钥</span>
+              <div class="mt-1.5 flex gap-2">
+                <div class="relative flex-1">
+                  <input :type="showKey ? 'text' : 'password'" x-model="form.api_key" placeholder="sk-..." class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl pl-3.5 pr-9 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+                  <span class="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 17a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/><path d="M9 9V7a3 3 0 0 1 6 0v2"/><rect x="7" y="9" width="10" height="10" rx="2"/></svg></span>
+                </div>
+                <button @click="showKey=!showKey" class="px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition" x-text="showKey ? '隐藏' : '显示'"></button>
+              </div>
+              <span class="text-[11px] text-zinc-500 mt-1 block">留空则使用下方自定义请求头进行鉴权</span>
+            </label>
+            <label class="block">
+              <span class="text-xs font-medium text-zinc-300">上游接口</span>
+              <select x-model="form.upstream_mode" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition">
+                <option value="chat_completions">chat · /chat/completions</option>
+                <option value="responses">responses · /responses</option>
+                <option value="messages">messages · /messages</option>
+              </select>
+            </label>
+          </div>
+
+          <!-- 模型 -->
+          <div class="rounded-xl border border-zinc-800 bg-zinc-950/30 overflow-hidden">
+            <div class="px-4 py-3 flex items-center justify-between bg-zinc-900/40 border-b border-zinc-800">
+              <div class="flex items-center gap-2">
+                <span class="w-7 h-7 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" stroke-width="1.8"><path d="M12 8V4H8"/><rect width="16" height="12" x="4" y="8" rx="2"/><path d="M2 14h2"/><path d="M20 14h2"/><path d="M15 13v2"/><path d="M9 13v2"/></svg></span>
+                <span class="text-sm font-medium">模型</span>
+                <span class="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400" x-text="form.models.length"></span>
+              </div>
+              <button @click="form.models.push({id:'',display_name:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加模型</button>
+            </div>
+            <div class="p-3 space-y-2">
+              <template x-for="(m, idx) in form.models" :key="idx">
+                <div class="flex gap-2 items-center group">
+                  <input x-model="m.id" placeholder="model-id · 如 gpt-4o" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <input x-model="m.display_name" placeholder="显示名称（可选）" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <button @click="form.models.splice(idx,1)" class="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-red-500/15 hover:text-red-400 text-zinc-500 flex items-center justify-center transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div>
+              </template>
+              <div x-show="form.models.length===0" class="text-xs text-zinc-500 text-center py-6 border border-dashed border-zinc-800 rounded-xl">尚未添加模型 · 至少添加一个以便按 model 路由</div>
+            </div>
+          </div>
+
+          <!-- 请求头 -->
+          <div class="rounded-xl border border-zinc-800 bg-zinc-950/30 overflow-hidden">
+            <div class="px-4 py-3 flex items-center justify-between bg-zinc-900/40 border-b border-zinc-800">
+              <div class="flex items-center gap-2">
+                <span class="w-7 h-7 rounded-lg bg-amber-500/10 border border-amber-500/20 flex items-center justify-center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#fbbf24" stroke-width="1.8"><path d="M4 22h14a2 2 0 0 0 2-2V7.5L14.5 2H6a2 2 0 0 0-2 2v4"/><polyline points="14 2 14 8 20 8"/><path d="M8 14h8"/><path d="M8 18h8"/></svg></span>
+                <span class="text-sm font-medium">自定义请求头</span>
+                <span class="text-xs px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400" x-text="form.headers.length"></span>
+              </div>
+              <button @click="form.headers.push({name:'',value:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加请求头</button>
+            </div>
+            <div class="p-3 space-y-2">
+              <template x-for="(h, idx) in form.headers" :key="idx">
+                <div class="flex gap-2 items-center">
+                  <input x-model="h.name" placeholder="Header-Name · 如 x-api-key" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <input x-model="h.value" placeholder="value" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <button @click="form.headers.splice(idx,1)" class="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-red-500/15 hover:text-red-400 text-zinc-500 flex items-center justify-center transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div>
+              </template>
+              <div x-show="form.headers.length===0" class="text-xs text-zinc-500 text-center py-4">无自定义请求头 · 可添加 x-api-key 等</div>
+            </div>
+          </div>
+
+          <!-- 操作栏 -->
+          <div class="flex flex-wrap items-center gap-3 pt-2">
+            <button @click="save()" class="px-6 py-2.5 rounded-xl bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-500 hover:to-indigo-500 text-sm font-medium shadow-lg shadow-violet-600/20 transition flex items-center gap-2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+              保存
+            </button>
+            <button @click="testConn()" :disabled="testing" class="px-5 py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-sm font-medium border border-zinc-700 transition flex items-center gap-2">
+              <span x-show="!testing" class="w-2 h-2 rounded-full bg-emerald-500"></span>
+              <svg x-show="testing" class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="#52525b" stroke-width="3"/><path d="M12 2a10 10 0 0 1 10 10" stroke="white" stroke-width="3" stroke-linecap="round"/></svg>
+              <span x-text="testing ? '测试中...' : '测试连接'"></span>
+            </button>
+            <button @click="remove()" class="ml-auto px-4 py-2.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/20 text-sm font-medium transition flex items-center gap-1.5"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg> 删除提供商</button>
+          </div>
+
+          <div x-show="msg" x-transition class="flex items-start gap-2 text-xs px-4 py-3 rounded-xl border" :class="msgOk ? 'bg-emerald-500/10 text-emerald-200 border-emerald-500/20' : 'bg-red-500/10 text-red-200 border-red-500/20'">
+            <span class="mt-0.5"><svg x-show="msgOk" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><svg x-show="!msgOk" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></span>
+            <span x-text="msg" class="flex-1 leading-relaxed"></span>
+          </div>
+          <div x-show="testResult" x-transition class="rounded-xl border border-zinc-800 bg-zinc-950 overflow-hidden">
+            <div class="px-3 py-2 flex items-center justify-between bg-zinc-900 border-b border-zinc-800">
+              <span class="text-xs font-medium text-zinc-400">测试结果</span>
+              <button @click="testResult=''" class="text-xs text-zinc-500 hover:text-zinc-300">清空</button>
+            </div>
+            <pre class="p-3 text-xs font-mono leading-relaxed whitespace-pre-wrap break-all text-zinc-300 max-h-[320px] overflow-auto custom-scroll" x-text="testResult"></pre>
+          </div>
+        </div>
+      </div>
+    </template>
+  </main>
+</div>
+
+<!-- Toast -->
+<div x-show="msg" x-transition:enter="transition ease-out duration-200" x-transition:enter-start="opacity-0 translate-y-2" x-transition:enter-end="opacity-100 translate-y-0" x-transition:leave="transition ease-in duration-150" x-transition:leave-start="opacity-100" x-transition:leave-end="opacity-0" class="fixed bottom-6 right-6 z-50 pointer-events-none">
+  <div class="px-4 py-3 rounded-xl shadow-2xl border backdrop-blur flex items-center gap-2 text-sm font-medium" :class="msgOk ? 'bg-zinc-900 border-emerald-500/30 text-emerald-200' : 'bg-zinc-900 border-red-500/30 text-red-200'">
+    <span class="w-2 h-2 rounded-full" :class="msgOk ? 'bg-emerald-500' : 'bg-red-500'"></span>
+    <span x-text="msg"></span>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

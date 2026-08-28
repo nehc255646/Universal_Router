@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+config.json
+config.lock
+config.tmp
+*.log
+.python-version
+dist/
+*.egg-info/
