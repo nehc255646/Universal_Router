@@ -198,9 +198,9 @@ async def test_provider(pid: str, request: Request):
     client: httpx.AsyncClient = request.app.state.httpx_client
     try:
         if provider.upstream_mode == "responses":
-            body: dict[str, Any] = {"model": model, "input": [{"role": "user", "content": "ping"}], "max_output_tokens": 8}
+            body: dict[str, Any] = {"model": model, "input": [{"role": "user", "content": "ping"}], "max_output_tokens": 16}
         else:
-            body = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 8}
+            body = {"model": model, "messages": [{"role": "user", "content": "ping"}], "max_tokens": 16}
         status, data = await post_non_stream(client, provider, body, timeout=20)
         latency = int((time.perf_counter() - t0) * 1000)
         ok = 200 <= status < 300
@@ -505,8 +505,9 @@ async def _parse_proxy_request(inbound: str, request: Request) -> tuple[dict[str
     return body, model, ir
 
 
-async def _handle_proxy(inbound: str, request: Request):
-    _auth_check(request)
+async def _handle_proxy(inbound: str, request: Request, *, skip_auth: bool = False):
+    if not skip_auth:
+        _auth_check(request)
     t0 = time.perf_counter()
     body, model, ir = await _parse_proxy_request(inbound, request)
     candidates = resolve_providers(model)
@@ -742,3 +743,11 @@ async def proxy_responses(request: Request):
 @proxy_router.post("/messages")
 async def proxy_messages(request: Request):
     return await _handle_proxy("messages", request)
+
+
+@manage_router.post("/play/{inbound}")
+async def play_proxy(inbound: str, request: Request):
+    """管理页试聊：复用 /api 鉴权；provider Key 不回传前端，试聊不能要求入站 Key。"""
+    if inbound not in ("chat", "responses", "messages"):
+        raise HTTPException(404, "unknown inbound")
+    return await _handle_proxy(inbound, request, skip_auth=True)

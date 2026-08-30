@@ -122,12 +122,6 @@ function app() {
       this.msg = m; this.msgOk = ok;
       setTimeout(()=> { if(this.msg===m) this.msg=''; }, 3000);
     },
-    authHeaders() {
-      const h = {'Content-Type':'application/json'};
-      const k = (this.serverCfg.local_api_key || this.adminKey || '').trim();
-      if (k) h['Authorization'] = 'Bearer ' + k;
-      return h;
-    },
     async refresh() {
       const r = await this.api('/api/providers');
       this.providers = await r.json();
@@ -283,20 +277,20 @@ print(r.choices[0].message.content)`;
       const messages = [];
       if (this.play.system.trim()) messages.push({role:'system', content: this.play.system.trim()});
       messages.push({role:'user', content: this.play.prompt.trim()});
-      let path = '/v1/chat/completions';
+      let path = '/api/play/chat';
       let body = { model: this.play.model, messages, stream: this.play.stream };
       if (this.play.protocol === 'responses') {
-        path = '/v1/responses';
+        path = '/api/play/responses';
         body = { model: this.play.model, input: messages, stream: this.play.stream };
         if (this.play.system.trim()) body.instructions = this.play.system.trim();
       } else if (this.play.protocol === 'messages') {
-        path = '/v1/messages';
+        path = '/api/play/messages';
         const sys = messages.filter(m=>m.role==='system').map(m=>m.content).join('\n');
         body = { model: this.play.model, messages: messages.filter(m=>m.role!=='system'), max_tokens: 1024, stream: this.play.stream };
         if (sys) body.system = sys;
       }
       try {
-        const r = await fetch(path, { method:'POST', headers: this.authHeaders(), body: JSON.stringify(body) });
+        const r = await this.api(path, { method:'POST', body: JSON.stringify(body) });
         if (!this.play.stream) {
           const data = await r.json();
           if (!r.ok) { this.play.error = JSON.stringify(data, null, 2); this.play.loading=false; return; }

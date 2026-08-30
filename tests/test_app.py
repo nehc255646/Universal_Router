@@ -53,6 +53,24 @@ def test_auth_when_local_key(isolated_config):
         assert r.status_code == 401
 
 
+def test_playground_route_skips_inbound_key(isolated_config):
+    isolated_config._config.providers = [
+        ProviderConfig(
+            id="p",
+            base_url="http://127.0.0.1:1/v1",
+            api_key="sk-upstream",
+            models=[ModelInfo(id="m")],
+        )
+    ]
+    with TestClient(app) as c:
+        body = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
+        assert c.post("/v1/chat/completions", json=body).status_code == 401
+        r = c.post("/api/play/chat", json=body)
+        assert r.status_code == 502
+        assert r.headers["X-Universal-Router-Provider"] == "p"
+        assert c.post("/api/play/nope", json=body).status_code == 404
+
+
 def test_provider_crud_masks_key(isolated_config):
     with TestClient(app) as c:
         r = c.post(
