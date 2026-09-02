@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.converter.chat_anthropic import anthropic_to_ir, ir_response_to_anthropic, ir_to_anthropic
-from app.converter.chat_responses import chat_to_ir, ir_response_to_chat, ir_to_chat, ir_to_responses, responses_to_ir
+from app.converter.chat_responses import chat_to_ir, ir_response_to_chat, ir_response_to_responses, ir_to_chat, ir_to_responses, responses_to_ir
 from app.converter.extras import CHAT_PASSTHROUGH, take_extras
 from app.ir import IRResponse, IRToolCall
 
@@ -93,7 +93,99 @@ def test_responses_string_input():
     assert ir.messages[1].content == "hello"
     out = ir_to_responses(ir)
     assert out["instructions"] == "be nice"
-    assert out["input"][-1]["content"] == "hello" or out["input"][-1]["role"] == "user"
+    last = out["input"][-1]
+    assert last["type"] == "message" and last["role"] == "user"
+    assert last["content"][0]["type"] == "input_text"
+    assert last["content"][0]["text"] == "hello"
+
+
+def test_responses_message_item_and_image():
+    ir = responses_to_ir(
+        {
+            "model": "m",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "see"},
+                        {"type": "input_image", "image_url": "https://x/a.png"},
+                    ],
+                }
+            ],
+        }
+    )
+    assert isinstance(ir.messages[-1].content, list)
+    assert ir.messages[-1].content[1].type == "image_url"
+    out = ir_to_responses(ir)
+    parts = out["input"][-1]["content"]
+    assert any(p.get("type") == "input_image" for p in parts)
+
+
+def test_responses_tools_and_choice_from_chat_shape():
+    ir = responses_to_ir(
+        {
+            "model": "m",
+            "input": "hi",
+            "tools": [{"type": "function", "function": {"name": "fn", "parameters": {"type": "object"}}}],
+            "tool_choice": {"type": "function", "name": "fn"},
+            "text": {"format": {"type": "json_object"}},
+            "reasoning": {"effort": "low"},
+        }
+    )
+    assert ir.tools[0].name == "fn"
+    chat = ir_to_chat(ir)
+    assert chat["tools"][0]["function"]["name"] == "fn"
+    assert chat["tool_choice"] == {"type": "function", "function": {"name": "fn"}}
+    assert chat["response_format"]["type"] == "json_object"
+    assert chat["reasoning_effort"] == "low"
+
+
+def test_chat_structured_output_to_responses():
+    ir = chat_to_ir(
+        {
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "response_format": {"type": "json_schema", "json_schema": {"name": "out", "schema": {"type": "object"}, "strict": True}},
+            "reasoning_effort": "medium",
+            "tool_choice": {"type": "function", "function": {"name": "fn"}},
+        }
+    )
+    out = ir_to_responses(ir)
+    assert out["text"]["format"]["type"] == "json_schema"
+    assert out["text"]["format"]["name"] == "out"
+    assert out["reasoning"]["effort"] == "medium"
+    assert out["tool_choice"] == {"type": "function", "name": "fn"}
+
+
+def test_responses_same_protocol_passthrough_fills_sdk_fields():
+    from app.server import _upstream_resp_to_inbound
+
+    data = {
+        "id": "resp_1",
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "ok"}]}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+    }
+    out = _upstream_resp_to_inbound("responses", "responses", data, "m")
+    assert out["output_text"] == "ok"
+    assert out["usage"]["input_tokens"] == 2
+    assert out["output"][0]["content"][0]["text"] == "ok"
+
+
+def test_ir_response_to_responses_usage_and_output_text():
+    ir = IRResponse(
+        model="m",
+        content="hello",
+        usage={"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
+    )
+    resp = ir_response_to_responses(ir)
+    assert resp["object"] == "response"
+    assert resp["output_text"] == "hello"
+    assert resp["usage"]["input_tokens"] == 3
+    assert resp["usage"]["output_tokens"] == 2
+    assert resp["output"][0]["type"] == "message"
+    assert resp["output"][0]["content"][0]["type"] == "output_text"
+    assert resp["output"][0].get("status") == "completed"
 
 
 def test_responses_function_call_history():

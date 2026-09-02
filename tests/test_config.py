@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from app.config import AppConfig, ModelInfo, ProviderConfig, apply_incoming_key, provider_public_dict
+from app.config import (
+    AppConfig,
+    ModelInfo,
+    ProviderConfig,
+    apply_incoming_key,
+    provider_auth_keys,
+    provider_public_dict,
+)
 
 
 def _p(pid: str, models: list[str], **kw) -> ProviderConfig:
@@ -40,7 +47,42 @@ def test_redact_and_preserve_key():
     pub = provider_public_dict(p)
     assert pub["api_key"] == ""
     assert pub["has_api_key"] is True
+    assert pub["has_inbound_key"] is False
     merged = apply_incoming_key({"id": "x", "base_url": "https://api.example.com/v1", "api_key": ""}, p)
     assert merged["api_key"] == "sk-secret"
     cleared = apply_incoming_key({"api_key": "", "clear_api_key": True}, p)
     assert cleared["api_key"] == ""
+
+
+def test_api_key_from_env_normalizes():
+    merged = apply_incoming_key({"api_key": "OPENAI_API_KEY", "api_key_from_env": True}, None)
+    assert merged["api_key"] == "env:OPENAI_API_KEY"
+    merged2 = apply_incoming_key({"api_key": "${DEEPSEEK_API_KEY}", "api_key_from_env": True}, None)
+    assert merged2["api_key"] == "env:DEEPSEEK_API_KEY"
+
+
+def test_api_key_from_env_invalid_name():
+    try:
+        apply_incoming_key({"api_key": "not a var", "api_key_from_env": True}, None)
+    except ValueError as e:
+        assert "环境变量名" in str(e)
+    else:
+        raise AssertionError("expected ValueError")
+
+
+def test_inbound_key_preserve_and_clear():
+    p = ProviderConfig(id="x", base_url="https://api.example.com/v1", api_key="sk-up", inbound_key="sk-client")
+    pub = provider_public_dict(p)
+    assert pub["inbound_key"] == ""
+    assert pub["has_inbound_key"] is True
+    merged = apply_incoming_key({"api_key": "", "inbound_key": ""}, p)
+    assert merged["inbound_key"] == "sk-client"
+    cleared = apply_incoming_key({"clear_inbound_key": True, "api_key": ""}, p)
+    assert cleared["inbound_key"] == ""
+
+
+def test_provider_auth_keys_prefer_inbound():
+    p = ProviderConfig(id="x", base_url="https://api.example.com/v1", api_key="sk-up-secret", inbound_key="")
+    assert "sk-up-secret" in provider_auth_keys(p)
+    p2 = ProviderConfig(id="x", base_url="https://api.example.com/v1", api_key="sk-up-secret", inbound_key="sk-client-custom")
+    assert provider_auth_keys(p2) == {"sk-client-custom"}

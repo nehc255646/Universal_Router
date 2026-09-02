@@ -3,8 +3,8 @@
 [中文](README.md) | **English**
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Version](https://img.shields.io/badge/version-1.0.0-purple)
-![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.1.0-purple)
+![Tests](https://img.shields.io/badge/tests-83%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 A **local three-protocol gateway**: clients can speak any API dialect, upstreams can require any protocol — everything in between is converted automatically.
@@ -120,10 +120,11 @@ curl http://127.0.0.1:8787/v1/messages \
 | State | Inbound `/v1/*` behavior |
 |---|---|
 | `server.local_api_key` is set | Requests must carry a matching key via `Authorization: Bearer` or `x-api-key` |
-| Unset, but some provider has an `api_key` | Requests must match one of them (clients can reuse the upstream key) |
-| Both empty | Local trusted, no auth |
+| No gateway key, but a provider has `inbound_key` | Must match that provider's inbound key |
+| No gateway / inbound key, but a provider has `api_key` | Must match one upstream key (clients may reuse it) |
+| All empty | Local trusted, no auth |
 
-`/api/*` (admin endpoints, incl. the built-in playground) uses `admin_api_key` or `local_api_key`; binding `0.0.0.0` requires one of them. **A dedicated `local_api_key` is recommended** so clients never need the upstream key.
+`/api/*` (admin endpoints, incl. the built-in playground) uses `admin_api_key` or `local_api_key`; binding `0.0.0.0` requires one of them or `/v1` and `/api` are locked except `/health`. **A dedicated `local_api_key` is recommended**; providers may also set `inbound_key`.
 
 Keys may reference environment variables: `env:OPENAI_API_KEY` / `${OPENAI_API_KEY}` / `$OPENAI_API_KEY`, avoiding plaintext on disk. Logs and error echoes are redacted automatically.
 
@@ -143,6 +144,8 @@ Keys may reference environment variables: `env:OPENAI_API_KEY` / `${OPENAI_API_K
 - **Layered timeouts**: connect / first streaming byte / idle between chunks, all configurable
 - **Disconnect cancel**: client disconnects cancel the upstream request — no wasted tokens
 - **Model routing**: request `model` or a `provider/model` prefix; providers sharing a model automatically form a failover pool
+- **Model alias**: `models[].upstream_id` maps the client id to the real upstream model name
+- **Tracing**: `X-Request-Id` on every response; failed logs keep a redacted preview; provider health/circuit stats persist in SQLite
 
 ## Management API reference
 
@@ -151,6 +154,8 @@ Keys may reference environment variables: `env:OPENAI_API_KEY` / `${OPENAI_API_K
 | `GET` | `/health` | Health check (version, provider count) |
 | `GET` | `/v1/models` | Model list (OpenAI format) |
 | `POST` | `/v1/chat/completions` · `/v1/responses` · `/v1/messages` | Three inbound protocols |
+| `GET` / `DELETE` | `/v1/responses/{id}` | Proxied to a responses upstream; 400 if none configured |
+| `POST` | `/v1/messages/count_tokens` | Anthropic token count; estimated if upstream is not `messages` |
 | `GET` / `PUT` | `/api/config` | Read / update server config |
 | `GET` / `POST` | `/api/providers` | List / create providers |
 | `PUT` / `DELETE` | `/api/providers/{pid}` | Update / delete a provider |
@@ -179,7 +184,8 @@ Keys may reference environment variables: `env:OPENAI_API_KEY` / `${OPENAI_API_K
 | `providers[].base_url` | Upstream root including `/v1` |
 | `providers[].api_key` | Plain text, or an `env:NAME` reference (recommended) |
 | `providers[].upstream_mode` | `chat_completions` / `responses` / `messages` |
-| `providers[].models` | Used for routing; fetchable from upstream in the admin page |
+| `providers[].models` | Routing ids; optional `upstream_id` is what we send upstream |
+| `providers[].inbound_key` | Client-facing key; empty falls back to upstream `api_key` |
 | `providers[].enabled` / `priority` / `weight` | Disabled, lower = higher priority, weight within a tier |
 | `providers[].headers` | Extra upstream headers (values also support env references) |
 | `providers[].cost_input_per_1m` / `cost_output_per_1m` | Cost routing and expense estimation |
@@ -197,7 +203,7 @@ Environment variables:
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 62 tests
+pytest -q
 ruff check app tests
 ```
 
@@ -223,6 +229,8 @@ config.example.json
 ## Notes & limitations
 
 - Streaming fails over only before the first upstream byte (incl. first-token timeout); errors after that arrive as in-band SSE error events
+- `previous_response_id` and `GET /v1/responses/{id}` need a responses upstream; they cannot be synthesized from chat/messages
+- Admin UI assets live in `static/vendor/` (no CDN required)
 - Some upstream-specific fields pass through a whitelist, so Chat's `n` etc. don't leak to Anthropic and cause 400s
 - Anthropic upstreams default `max_tokens` to 4096 when unspecified
 - Streaming uses incremental UTF-8 decoding — multi-byte characters survive chunk boundaries; config writes use a cross-process file lock with rollback

@@ -4,17 +4,15 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Universal Router — 本地协议转换网关</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<script src="https://cdn.tailwindcss.com"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js"></script>
+<script src="/vendor/tailwind.js"></script>
+<script defer src="/vendor/alpine.min.js"></script>
 <link rel="stylesheet" href="style.css" />
 <script>
 tailwind.config={
   darkMode:'class',
   theme:{
     extend:{
-      fontFamily:{ sans:['Inter','system-ui','sans-serif'], mono:['JetBrains Mono','monospace']},
+      fontFamily:{ sans:['system-ui','Segoe UI','sans-serif'], mono:['ui-monospace','Consolas','monospace']},
       animation:{ 'pulse-slow':'pulse 3s cubic-bezier(0.4,0,0.6,1) infinite' }
     }
   }
@@ -81,9 +79,10 @@ tailwind.config={
           <span class="w-6 h-6 rounded-lg bg-zinc-800 flex items-center justify-center"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="text-zinc-400"><path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z"/><path d="M12 14a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="M4.93 4.93l1.41 1.41"/><path d="M17.66 17.66l1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="M6.34 17.66l-1.41 1.41"/><path d="M19.07 4.93l-1.41 1.41"/></svg></span>
           <span class="text-sm font-medium">网关设置</span>
         </div>
-        <span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20">重启生效</span>
+        <span class="text-[11px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20" x-text="status && status.restart_needed ? '需重启后生效' : '监听地址改完需重启'"></span>
       </div>
       <div class="p-4 space-y-3">
+        <div x-show="status && status.restart_needed" class="text-[11px] px-3 py-2 rounded-lg bg-amber-500/10 text-amber-200 border border-amber-500/20">当前进程仍监听 <span class="font-mono" x-text="(status.bind_host||'')+':'+(status.bind_port||'')"></span>，保存的 Host/端口需重启网关后才会换绑。</div>
         <div class="grid grid-cols-[1fr_110px] gap-3">
           <label class="block">
             <span class="text-[11px] font-medium text-zinc-400">监听 Host</span>
@@ -119,7 +118,7 @@ tailwind.config={
               <option value="weighted">加权轮询</option>
               <option value="latency">最低延迟</option>
               <option value="health">健康评分</option>
-              <option value="cost">最低成本</option>
+              <option value="cost">最低成本（按下方估算单价）</option>
             </select>
           </label>
           <label class="block">
@@ -198,7 +197,8 @@ tailwind.config={
                 <div class="text-[11px] text-zinc-500 truncate flex items-center gap-1 mt-1"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> <span x-text="p.base_url"></span></div>
                 <div class="flex items-center gap-1.5 mt-2">
                   <span class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500" x-text="p.models.length+' 模型'"></span>
-                  <span x-show="p.has_api_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">已配置 Key</span>
+                  <span x-show="p.has_api_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500" x-text="p.api_key_is_ref ? '环境变量 Key' : '已配置 Key'"></span>
+                  <span x-show="p.has_inbound_key" class="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">自定义调用密钥</span>
                   <span x-show="p.enabled===false" class="text-[10px] px-1.5 py-0.5 rounded bg-red-500/15 text-red-300">已停用</span>
                   <span x-show="healthOf(p.id)" class="text-[10px] px-1.5 py-0.5 rounded" :class="healthBadgeClass(p.id)" x-text="healthLabel(p.id)"></span>
                 </div>
@@ -225,7 +225,7 @@ tailwind.config={
     </div>
 
     <div x-show="tab==='play'" class="flex-1 p-6 space-y-4 overflow-auto custom-scroll" x-cloak>
-      <div class="grid grid-cols-1 md:grid-cols-[1fr_140px_110px] gap-3">
+      <div class="grid grid-cols-1 md:grid-cols-[1fr_140px_90px] gap-3">
         <label class="block">
           <span class="text-xs font-medium text-zinc-400">模型</span>
           <select x-model="play.model" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2.5 text-sm">
@@ -248,6 +248,10 @@ tailwind.config={
           <span class="text-sm text-zinc-300">流式</span>
         </label>
       </div>
+      <label class="flex items-center gap-2 text-sm text-zinc-300">
+        <input type="checkbox" x-model="play.tools" class="rounded border-zinc-700 bg-zinc-900" />
+        附带示例 tool（get_weather），用于验证 tool_calls 转换
+      </label>
       <input x-model="play.system" placeholder="System prompt（可选）" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm" />
       <textarea x-model="play.prompt" rows="4" placeholder="输入一条消息，验证协议转换是否正常…" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm resize-y"></textarea>
       <button @click="sendPlay()" :disabled="play.loading" class="px-5 py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 disabled:opacity-50 text-sm font-medium">
@@ -293,12 +297,15 @@ tailwind.config={
             <span class="px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-300" x-text="e.inbound"></span>
             <span class="font-mono text-zinc-300 truncate max-w-[220px]" x-text="e.model"></span>
             <span class="text-zinc-500" x-text="e.provider_id || '-'"></span>
+            <span x-show="e.upstream_mode" class="text-zinc-600" x-text="e.upstream_mode"></span>
             <span :class="e.status<400 ? 'text-emerald-300' : 'text-red-300'" x-text="e.status"></span>
             <span class="text-zinc-500" x-text="e.latency_ms + 'ms'"></span>
             <span x-show="e.attempts>1" class="text-amber-300" x-text="'×'+e.attempts"></span>
             <span x-show="e.prompt_tokens || e.completion_tokens" class="text-zinc-500" x-text="(e.prompt_tokens||0)+'→'+(e.completion_tokens||0)+' tok'"></span>
             <span x-show="e.stream" class="text-violet-300">stream</span>
+            <span x-show="e.request_id" class="font-mono text-zinc-600 truncate max-w-[120px]" x-text="e.request_id"></span>
             <span x-show="e.error" class="text-red-300/80 truncate max-w-[280px]" x-text="e.error"></span>
+            <span x-show="e.preview && e.status>=400" class="basis-full text-zinc-600 truncate" x-text="e.preview"></span>
           </div>
         </template>
       </div>
@@ -386,11 +393,11 @@ tailwind.config={
           </div>
           <div class="grid grid-cols-2 gap-3">
             <label class="block">
-              <span class="text-xs font-medium text-zinc-400">输入成本 / 1M tokens</span>
+              <span class="text-xs font-medium text-zinc-400">输入单价估算 / 1M tokens</span>
               <input x-model.number="form.cost_input_per_1m" type="number" min="0" step="0.01" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-sm" />
             </label>
             <label class="block">
-              <span class="text-xs font-medium text-zinc-400">输出成本 / 1M tokens</span>
+              <span class="text-xs font-medium text-zinc-400">输出单价估算 / 1M tokens</span>
               <input x-model.number="form.cost_output_per_1m" type="number" min="0" step="0.01" class="mt-1 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3 py-2 text-sm" />
             </label>
           </div>
@@ -404,18 +411,28 @@ tailwind.config={
           </label>
 
           <div class="grid grid-cols-1 md:grid-cols-[1fr_160px] gap-4">
-            <label class="block">
-              <span class="text-xs font-medium text-zinc-300">API 密钥</span>
+            <div class="block">
+              <div class="flex items-center justify-between gap-3">
+                <span class="text-xs font-medium text-zinc-300" x-text="form.use_env_key ? '环境变量名称' : 'API 密钥'"></span>
+                <label class="flex items-center gap-1.5 text-[11px] text-zinc-400 cursor-pointer select-none">
+                  <input type="checkbox" x-model="form.use_env_key" @change="onToggleEnvKey()" class="rounded border-zinc-700 bg-zinc-900" />
+                  通过环境变量获取密钥
+                </label>
+              </div>
               <div class="mt-1.5 flex gap-2">
                 <div class="relative flex-1">
-                  <input :type="showKey ? 'text' : 'password'" x-model="form.api_key" placeholder="sk-... 或 env:OPENAI_API_KEY" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl pl-3.5 pr-9 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
-                  <span class="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-600"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 17a1 1 0 1 0 0-2 1 1 0 0 0 0 2z"/><path d="M9 9V7a3 3 0 0 1 6 0v2"/><rect x="7" y="9" width="10" height="10" rx="2"/></svg></span>
+                  <template x-if="form.use_env_key">
+                    <input type="text" x-model="form.api_key" placeholder="例如 OPENAI_API_KEY" class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl pl-3.5 pr-3.5 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+                  </template>
+                  <template x-if="!form.use_env_key">
+                    <input :type="showKey ? 'text' : 'password'" x-model="form.api_key" placeholder="sk-..." class="w-full bg-zinc-950/70 border border-zinc-800 rounded-xl pl-3.5 pr-9 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+                  </template>
                 </div>
-                <button @click="showKey=!showKey" class="px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition" x-text="showKey ? '隐藏' : '显示'"></button>
+                <button x-show="!form.use_env_key" @click="showKey=!showKey" class="px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition" x-text="showKey ? '隐藏' : '显示'"></button>
               </div>
-              <span class="text-[11px] text-zinc-500 mt-1 block" x-text="form.api_key_is_ref ? '当前为环境变量引用' : (form.has_api_key ? '已保存密钥 · 留空则不修改 · 可用 env:NAME' : '明文或 env:NAME / ${NAME}，避免把真实 Key 写入 config.json')"></span>
+              <span class="text-[11px] text-zinc-500 mt-1 block" x-text="form.use_env_key ? (form.has_api_key ? '将从该环境变量读取上游密钥 · 留空则不修改' : '运行网关的进程环境中需存在该变量，config.json 只保存变量名') : (form.has_api_key ? '已保存密钥 · 留空则不修改' : '明文写入 config.json；更推荐改用环境变量')"></span>
               <button x-show="form.has_api_key" type="button" @click="clearKey()" class="text-[11px] text-red-300/80 hover:text-red-300 mt-1">清除已保存密钥</button>
-            </label>
+            </div>
             <label class="block">
               <span class="text-xs font-medium text-zinc-300">上游接口</span>
               <select x-model="form.upstream_mode" class="mt-1.5 w-full bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition">
@@ -425,6 +442,16 @@ tailwind.config={
               </select>
             </label>
           </div>
+
+          <label class="block">
+            <span class="text-xs font-medium text-zinc-300">调用密钥</span>
+            <div class="mt-1.5 flex gap-2">
+              <input :type="showInboundKey ? 'text' : 'password'" x-model="form.inbound_key" placeholder="留空则使用上游密钥" class="flex-1 bg-zinc-950/70 border border-zinc-800 rounded-xl px-3.5 py-2.5 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-4 focus:ring-violet-500/10 transition" />
+              <button @click="showInboundKey=!showInboundKey" class="px-4 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition" x-text="showInboundKey ? '隐藏' : '显示'"></button>
+            </div>
+            <span class="text-[11px] text-zinc-500 mt-1 block" x-text="form.has_inbound_key ? '已设置自定义调用密钥 · 留空不修改' : (serverCfg.has_local_api_key ? '已设置网关本地 Key 时入站仍用网关 Key；本项在未设网关 Key 时生效' : '客户端调用本网关时携带的 Key；留空则与上游密钥相同')"></span>
+            <button x-show="form.has_inbound_key" type="button" @click="clearInboundKey()" class="text-[11px] text-red-300/80 hover:text-red-300 mt-1">恢复为上游密钥</button>
+          </label>
 
           <!-- 模型 -->
           <div class="rounded-xl border border-zinc-800 bg-zinc-950/30 overflow-hidden">
@@ -436,18 +463,19 @@ tailwind.config={
               </div>
               <div class="flex gap-2">
                 <button @click="fetchModels()" :disabled="fetchingModels" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-xs font-medium transition" x-text="fetchingModels ? '拉取中…' : '从上游拉取'"></button>
-                <button @click="form.models.push({id:'',display_name:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加模型</button>
+                <button @click="form.models.push({id:'',display_name:'',upstream_id:''})" class="px-3 py-1.5 rounded-full bg-zinc-800 hover:bg-zinc-700 text-xs font-medium transition flex items-center gap-1"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> 添加模型</button>
               </div>
             </div>
             <div class="p-3 space-y-2">
               <template x-for="(m, idx) in form.models" :key="idx">
                 <div class="flex gap-2 items-center group">
-                  <input x-model="m.id" placeholder="model-id · 如 gpt-4o" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
-                  <input x-model="m.display_name" placeholder="显示名称（可选）" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <input x-model="m.id" placeholder="客户端 model id" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <input x-model="m.upstream_id" placeholder="上游 id（可空）" class="w-[28%] bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
+                  <input x-model="m.display_name" placeholder="显示名称" class="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm placeholder:text-zinc-600 focus:outline-none focus:border-violet-500/50 focus:ring-2 focus:ring-violet-500/10 transition" />
                   <button @click="form.models.splice(idx,1)" class="w-8 h-8 rounded-lg bg-zinc-800 hover:bg-red-500/15 hover:text-red-400 text-zinc-500 flex items-center justify-center transition"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
                 </div>
               </template>
-              <div x-show="form.models.length===0" class="text-xs text-zinc-500 text-center py-6 border border-dashed border-zinc-800 rounded-xl">尚未添加模型 · 至少添加一个以便按 model 路由</div>
+              <div x-show="form.models.length===0" class="text-xs text-zinc-500 text-center py-6 border border-dashed border-zinc-800 rounded-xl">尚未添加模型 · 客户端 id 用于路由，上游 id 可映射到真实模型名</div>
             </div>
           </div>
 

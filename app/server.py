@@ -32,18 +32,24 @@ from .converter.chat_responses import (
     ir_to_chat,
     ir_to_responses,
     responses_to_ir,
+    usage_to_responses,
 )
 from .converter.common import sse_format as _sse
 from .ir import IRResponse, IRToolCall
 from .router import is_retryable_status, resolve_providers
+from . import ctx
 from .secrets import collect_secrets, redact, redact_any
-from .stream import convert_stream
-from .upstream import StreamTimeoutError, UpstreamHTTPError, fetch_upstream_models, post_non_stream, stream_upstream
+from .stream import convert_stream, inbound_mode
+from .upstream import StreamTimeoutError, UpstreamHTTPError, fetch_upstream_models, post_non_stream, raw_request, stream_upstream
 
 
 def _secret_extras() -> list[str]:
     cfg = config_manager.config
-    return collect_secrets(cfg.server.local_api_key, cfg.server.admin_api_key, *[p.api_key for p in cfg.providers])
+    return collect_secrets(
+        cfg.server.local_api_key,
+        cfg.server.admin_api_key,
+        *[x for p in cfg.providers for x in (p.api_key, p.inbound_key)],
+    )
 
 
 def _safe_error(obj: Any) -> Any:
@@ -98,15 +104,57 @@ proxy_router = APIRouter(prefix="/v1")
 STARTED = time.time()
 
 
+def _hdr(provider_id: str | None = None) -> dict[str, str]:
+    h: dict[str, str] = {}
+    if provider_id:
+        h["X-Universal-Router-Provider"] = provider_id
+    return h
+
+
+def _set_preview(body: dict[str, Any]) -> None:
+    slim: dict[str, Any] = {"model": body.get("model"), "stream": bool(body.get("stream"))}
+    if body.get("tools"):
+        slim["tools"] = True
+    if body.get("previous_response_id"):
+        slim["previous_response_id"] = True
+    inp = body.get("input") if "input" in body else body.get("messages")
+    if isinstance(inp, str):
+        slim["input"] = inp[:240]
+    elif isinstance(inp, list):
+        slim["n_items"] = len(inp)
+    ctx.log_preview.set(json.dumps(slim, ensure_ascii=False))
+
+
+def _estimate_tokens(ir: Any) -> int:
+    n = 0
+    for m in getattr(ir, "messages", None) or []:
+        c = m.content
+        if isinstance(c, str):
+            n += len(c)
+        elif isinstance(c, list):
+            n += sum(len(x.text or "") for x in c)
+        if m.reasoning:
+            n += len(m.reasoning)
+    inst = (getattr(ir, "extra", None) or {}).get("instructions")
+    if isinstance(inst, str):
+        n += len(inst)
+    return max(1, n // 4)
+
+
 @manage_router.get("/status")
-async def api_status():
+async def api_status(request: Request):
     cfg = config_manager.config
+    bind_host = getattr(request.app.state, "bind_host", cfg.server.host)
+    bind_port = getattr(request.app.state, "bind_port", cfg.server.port)
     return {
         "ok": True,
         "version": __version__,
         "uptime_s": int(time.time() - STARTED),
         "host": cfg.server.host,
         "port": cfg.server.port,
+        "bind_host": bind_host,
+        "bind_port": bind_port,
+        "restart_needed": bind_host != cfg.server.host or int(bind_port) != int(cfg.server.port),
         "providers": len(cfg.providers),
         "models": len(config_manager.all_models()),
         "auth": bool((cfg.server.local_api_key or "").strip()),
@@ -193,7 +241,7 @@ async def test_provider(pid: str, request: Request):
         raise HTTPException(404, "provider not found")
     if not provider.models:
         raise HTTPException(400, "该提供商未配置 models，无法测试")
-    model = provider.models[0].id
+    model = provider.upstream_model_id(provider.models[0].id)
     t0 = time.perf_counter()
     client: httpx.AsyncClient = request.app.state.httpx_client
     try:
@@ -296,8 +344,9 @@ def _to_ir(inbound: str, body: dict[str, Any]):
 
 def _from_ir_to_upstream(ir, provider: ProviderConfig, stream: bool):
     stripped = _strip_provider_prefix(ir.model, provider)
-    if stripped != ir.model:
-        ir = ir.model_copy(update={"model": stripped})
+    send_id = provider.upstream_model_id(stripped)
+    if send_id != ir.model:
+        ir = ir.model_copy(update={"model": send_id})
     mode = provider.upstream_mode
     if mode == "chat_completions":
         return ir_to_chat(ir, stream=stream)
@@ -433,7 +482,31 @@ def _upstream_to_ir_response(data: dict[str, Any], upstream_mode: str, fallback_
     raise HTTPException(500, f"unknown upstream_mode {upstream_mode}")
 
 
+def _normalize_responses_object(data: dict[str, Any]) -> dict[str, Any]:
+    """同协议透传时补齐官方 SDK 常用字段，不改写 output 结构。"""
+    out = dict(data)
+    out.setdefault("object", "response")
+    out.setdefault("status", "completed")
+    if "output_text" not in out:
+        text = ""
+        for item in out.get("output") or []:
+            if not isinstance(item, dict) or item.get("type") != "message":
+                continue
+            for c in item.get("content") or []:
+                if isinstance(c, dict) and c.get("type") == "output_text":
+                    text += c.get("text") or ""
+        out["output_text"] = text
+    usage = out.get("usage")
+    if isinstance(usage, dict) and "input_tokens" not in usage:
+        out["usage"] = usage_to_responses(usage)
+    return out
+
+
 def _upstream_resp_to_inbound(inbound: str, upstream_mode: str, data: dict[str, Any], model: str) -> dict[str, Any]:
+    if inbound_mode(inbound) == upstream_mode:
+        if inbound == "responses" and isinstance(data, dict):
+            return _normalize_responses_object(data)
+        return data
     ir_resp = _upstream_to_ir_response(data, upstream_mode, model)
     if inbound == "chat":
         return ir_response_to_chat(ir_resp)
@@ -510,7 +583,14 @@ async def _handle_proxy(inbound: str, request: Request, *, skip_auth: bool = Fal
         _auth_check(request)
     t0 = time.perf_counter()
     body, model, ir = await _parse_proxy_request(inbound, request)
+    _set_preview(body)
     candidates = resolve_providers(model)
+    if (ir.extra or {}).get("previous_response_id"):
+        only = [p for p in candidates if p.upstream_mode == "responses"]
+        if not only:
+            access_log.add(inbound=inbound, model=model, provider_id=None, stream=False, status=400, latency_ms=0, error="previous_response_id requires responses upstream")
+            raise HTTPException(400, "previous_response_id 仅在上游为 responses 时可用，请为该模型配置 responses 提供商")
+        candidates = only
     if not candidates:
         access_log.add(inbound=inbound, model=model, provider_id=None, stream=False, status=400, latency_ms=0, error="unknown model")
         raise HTTPException(400, f"未知 model '{model}'，请先在管理页配置提供商与模型")
@@ -550,6 +630,7 @@ async def _proxy_non_stream(
         for attempt in range(n_tries):
             attempts += 1
             last_pid = provider.id
+            ctx.upstream_mode.set(provider.upstream_mode)
             try:
                 result = await _post_with_disconnect_watch(client, provider, upstream_body, provider.timeout_s, request)
             except Exception as e:
@@ -580,7 +661,7 @@ async def _proxy_non_stream(
                     continue
                 ms = int((time.perf_counter() - t0) * 1000)
                 access_log.add(inbound=inbound, model=model, provider_id=last_pid, stream=False, status=last_status, latency_ms=ms, error=text[:200], attempts=attempts)
-                return JSONResponse(content=last_payload, status_code=last_status)
+                return JSONResponse(content=last_payload, status_code=last_status, headers={"X-Universal-Router-Provider": last_pid})
             if 200 <= status < 300:
                 stripped = _strip_provider_prefix(model, provider)
                 result_inbound = _upstream_resp_to_inbound(inbound, provider.upstream_mode, data, stripped)
@@ -648,6 +729,7 @@ def _proxy_stream(
                 for attempt in range(n_tries):
                     attempts += 1
                     last_pid = provider.id
+                    ctx.upstream_mode.set(provider.upstream_mode)
                     try:
                         raw = stream_upstream(client, provider, upstream_body, timeout=max(provider.timeout_s, 60))
                         it = raw.__aiter__()
@@ -743,6 +825,73 @@ async def proxy_responses(request: Request):
 @proxy_router.post("/messages")
 async def proxy_messages(request: Request):
     return await _handle_proxy("messages", request)
+
+
+@proxy_router.post("/messages/count_tokens")
+async def proxy_count_tokens(request: Request):
+    _auth_check(request)
+    body, model, ir = await _parse_proxy_request("messages", request)
+    _set_preview(body)
+    candidates = resolve_providers(model)
+    if not candidates:
+        raise HTTPException(400, f"未知 model '{model}'")
+    native = [p for p in candidates if p.upstream_mode == "messages"]
+    client: httpx.AsyncClient = request.app.state.httpx_client
+    if native:
+        provider = native[0]
+        ctx.upstream_mode.set(provider.upstream_mode)
+        send = _from_ir_to_upstream(ir, provider, stream=False)
+        send.pop("stream", None)
+        try:
+            status, data = await raw_request(client, provider, "POST", "/messages/count_tokens", json_body=send, timeout=20)
+        except Exception as e:
+            raise HTTPException(502, redact(str(e), _secret_extras())) from e
+        if isinstance(data, dict) and 200 <= status < 300:
+            return JSONResponse(content=data, headers=_hdr(provider.id))
+        if isinstance(data, dict):
+            return JSONResponse(content=_safe_error(data), status_code=status if status >= 400 else 502, headers=_hdr(provider.id))
+    n = _estimate_tokens(ir)
+    access_log.add(inbound="messages", model=model, provider_id=candidates[0].id, stream=False, status=200, latency_ms=0, error=None, preview="count_tokens estimated")
+    return JSONResponse(content={"input_tokens": n, "estimated": True}, headers=_hdr(candidates[0].id))
+
+
+async def _proxy_stored_response(request: Request, rid: str, method: str):
+    _auth_check(request)
+    providers = [p for p in config_manager.config.providers if p.enabled and p.upstream_mode == "responses"]
+    if not providers:
+        raise HTTPException(400, f"{method} /v1/responses/{{id}} 需要至少一个 responses 上游（有状态检索无法从 chat/messages 还原）")
+    client: httpx.AsyncClient = request.app.state.httpx_client
+    last_status = 404
+    last_data: Any = {"error": {"message": "response not found"}}
+    last_pid = providers[0].id
+    for p in providers:
+        ctx.upstream_mode.set(p.upstream_mode)
+        try:
+            status, data = await raw_request(client, p, method, f"/responses/{rid}", timeout=30)
+        except Exception as e:
+            last_status = 502
+            last_data = {"error": {"message": redact(str(e), _secret_extras())}}
+            last_pid = p.id
+            continue
+        last_status, last_data, last_pid = status, data, p.id
+        if 200 <= status < 300:
+            body = data if isinstance(data, dict) else {"data": data.decode(errors="ignore") if isinstance(data, bytes) else data}
+            return JSONResponse(content=body, status_code=status, headers=_hdr(p.id))
+        if status not in (404, 400):
+            payload = _safe_error(data) if isinstance(data, dict) else {"error": {"message": "upstream error"}}
+            return JSONResponse(content=payload, status_code=status, headers=_hdr(p.id))
+    payload = _safe_error(last_data) if isinstance(last_data, dict) else {"error": {"message": "not found"}}
+    return JSONResponse(content=payload, status_code=last_status, headers=_hdr(last_pid))
+
+
+@proxy_router.get("/responses/{rid}")
+async def get_response(rid: str, request: Request):
+    return await _proxy_stored_response(request, rid, "GET")
+
+
+@proxy_router.delete("/responses/{rid}")
+async def delete_response(rid: str, request: Request):
+    return await _proxy_stored_response(request, rid, "DELETE")
 
 
 @manage_router.post("/play/{inbound}")

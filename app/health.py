@@ -36,6 +36,65 @@ def reset_health() -> None:
         _stats.clear()
 
 
+def load_persisted() -> None:
+    """从 SQLite 恢复计数与熔断状态；半开探测不跨进程保留。"""
+    from . import access_log
+
+    try:
+        rows = access_log.load_provider_stats()
+    except Exception:
+        return
+    with _lock:
+        for r in rows:
+            pid = str(r.get("provider_id") or "")
+            if not pid:
+                continue
+            state = r.get("state") or "closed"
+            if state == "half_open":
+                state = "open"
+            _stats[pid] = ProviderStats(
+                provider_id=pid,
+                state=state if state in ("closed", "open", "half_open") else "closed",
+                ewma_latency_ms=float(r.get("ewma_latency_ms") or 0),
+                success=int(r.get("success") or 0),
+                failure=int(r.get("failure") or 0),
+                consecutive_failures=int(r.get("consecutive_failures") or 0),
+                tokens_in=int(r.get("tokens_in") or 0),
+                tokens_out=int(r.get("tokens_out") or 0),
+                est_cost=float(r.get("est_cost") or 0),
+                last_error=r.get("last_error"),
+                last_success_at=r.get("last_success_at"),
+                last_fail_at=r.get("last_fail_at"),
+                opened_at=r.get("opened_at"),
+                half_open_probe=False,
+            )
+
+
+def _persist(s: ProviderStats) -> None:
+    try:
+        from . import access_log
+
+        access_log.save_provider_stats(
+            {
+                "provider_id": s.provider_id,
+                "state": s.state,
+                "ewma_latency_ms": s.ewma_latency_ms,
+                "success": s.success,
+                "failure": s.failure,
+                "consecutive_failures": s.consecutive_failures,
+                "tokens_in": s.tokens_in,
+                "tokens_out": s.tokens_out,
+                "est_cost": s.est_cost,
+                "last_error": s.last_error,
+                "last_success_at": s.last_success_at,
+                "last_fail_at": s.last_fail_at,
+                "opened_at": s.opened_at,
+            }
+        )
+    except Exception:
+        pass
+
+
 def prune(pids: list[str]) -> list[str]:
     """删除不在 pids 中的统计条目（provider 已删除/重命名），返回被清理的 id。"""
     with _lock:
@@ -153,6 +212,7 @@ def record_success(
         s.state = "closed"
         s.opened_at = None
         s.half_open_probe = False
+        _persist(s)
 
 
 def record_failure(pid: str, *, error: str | None, threshold: int) -> None:
@@ -166,3 +226,4 @@ def record_failure(pid: str, *, error: str | None, threshold: int) -> None:
         if s.state == "half_open" or s.consecutive_failures >= max(1, int(threshold)):
             s.state = "open"
             s.opened_at = time.time()
+        _persist(s)

@@ -3,8 +3,8 @@
 **中文** | [English](README.en.md)
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Version](https://img.shields.io/badge/version-1.0.0-purple)
-![Tests](https://img.shields.io/badge/tests-62%20passed-brightgreen)
+![Version](https://img.shields.io/badge/version-1.1.0-purple)
+![Tests](https://img.shields.io/badge/tests-83%20passed-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 本地 **三协议互转网关**：客户端用哪种 API 形态都行，上游只认哪种协议都行 —— 中间全部自动转换。
@@ -120,10 +120,11 @@ curl http://127.0.0.1:8787/v1/messages \
 | 状态 | 入站 `/v1/*` 行为 |
 |---|---|
 | 设置了 `server.local_api_key` | 必须携带匹配该 Key 的 `Authorization: Bearer` 或 `x-api-key` |
-| 未设置，但某 provider 配了 `api_key` | 必须匹配其中之一（客户端可直接复用上游 Key） |
+| 未设置网关 Key，但某 provider 配了 `inbound_key` | 必须匹配该提供商的调用密钥 |
+| 未设置网关 Key 与调用密钥，但配了 `api_key` | 必须匹配上游 Key 之一（客户端可直接复用） |
 | 都为空 | 本地可信，不鉴权 |
 
-`/api/*`（管理接口，含内置试聊）使用 `admin_api_key` 或 `local_api_key` 鉴权；绑定 `0.0.0.0` 时必须设置其中之一。**推荐单独设置 `local_api_key`**，客户端无需知道上游 Key。
+`/api/*`（管理接口，含内置试聊）使用 `admin_api_key` 或 `local_api_key` 鉴权；绑定 `0.0.0.0` 时必须设置其中之一，否则除 `/health` 外全部锁定。**推荐单独设置 `local_api_key`**；提供商还可设 `inbound_key` 作为该渠道的调用密钥。
 
 密钥支持引用环境变量：`env:OPENAI_API_KEY` / `${OPENAI_API_KEY}` / `$OPENAI_API_KEY`，避免明文落盘。日志与错误回显自动脱敏。
 
@@ -143,6 +144,8 @@ curl http://127.0.0.1:8787/v1/messages \
 - **分层超时**：connect / 流式首字节 / 相邻 chunk 空闲，各自可配置
 - **断连取消**：客户端断开时自动取消上游请求，不浪费 token
 - **模型路由**：请求 `model` 或 `provider/model` 前缀均可；多个提供商配同一模型即自动组成备选池
+- **模型别名**：`models[].upstream_id` 把客户端 id 映射成上游真实模型名（例如客户端 `gpt-4o` → 上游 `deepseek-chat`）
+- **请求追踪**：响应头 `X-Request-Id`（可自带），失败日志含协议路径与脱敏摘要；提供商健康/熔断统计落 SQLite，重启不丢
 
 ## 管理 API 一览
 
@@ -151,6 +154,8 @@ curl http://127.0.0.1:8787/v1/messages \
 | `GET` | `/health` | 健康检查（含版本号、提供商数） |
 | `GET` | `/v1/models` | 模型列表（OpenAI 格式） |
 | `POST` | `/v1/chat/completions` · `/v1/responses` · `/v1/messages` | 三协议入站 |
+| `GET` / `DELETE` | `/v1/responses/{id}` | 透传到 responses 上游；无此类上游则 400 |
+| `POST` | `/v1/messages/count_tokens` | Anthropic 计 token；非 messages 上游则估算 |
 | `GET` / `PUT` | `/api/config` | 读取 / 更新 server 配置 |
 | `GET` / `POST` | `/api/providers` | 列出 / 新增提供商 |
 | `PUT` / `DELETE` | `/api/providers/{pid}` | 修改 / 删除提供商 |
@@ -179,7 +184,8 @@ curl http://127.0.0.1:8787/v1/messages \
 | `providers[].base_url` | 含 `/v1` 的上游根路径 |
 | `providers[].api_key` | 明文，或 `env:NAME` 引用（推荐） |
 | `providers[].upstream_mode` | `chat_completions` / `responses` / `messages` |
-| `providers[].models` | 用于路由；可在管理页「从上游拉取」 |
+| `providers[].models` | 用于路由；`upstream_id` 可选，发给上游的真实模型 id |
+| `providers[].inbound_key` | 客户端调用密钥；为空则回退上游 `api_key` |
 | `providers[].enabled` / `priority` / `weight` | 停用、越小越优先、同优先级权重 |
 | `providers[].headers` | 额外上游请求头（值同样支持 env 引用） |
 | `providers[].cost_input_per_1m` / `cost_output_per_1m` | 成本路由与费用估算 |
@@ -197,7 +203,7 @@ curl http://127.0.0.1:8787/v1/messages \
 
 ```bash
 pip install -e ".[dev]"
-pytest -q        # 62 tests
+pytest -q
 ruff check app tests
 ```
 
@@ -223,6 +229,8 @@ config.example.json
 ## 说明与限制
 
 - 流式仅在与上游交换首字节前 failover（含 first-token 超时）；首字节后的错误以带内 error 事件下发
+- `previous_response_id` / `GET /v1/responses/{id}` 需要 responses 上游；跨协议无法伪造服务端会话
+- 管理页静态资源在 `static/vendor/`，不依赖外网 CDN
 - 部分上游专有字段按白名单透传，避免 Chat 的 `n` 等泄漏到 Anthropic 导致 400
 - Anthropic 上游若未指定 `max_tokens`，默认补 4096
 - 流式解析使用增量 UTF-8 解码，多字节字符跨网络分块不乱码；配置写入带跨进程文件锁与变更回滚

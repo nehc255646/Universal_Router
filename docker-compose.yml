@@ -12,8 +12,8 @@ services:
     environment:
       - UR_CONFIG=/app/config.json
       - UR_LOG_DB=/app/data/access.db
-      # 可选：设置管理员密钥（绑定 0.0.0.0 时强烈建议）
-      # - UR_CORS_ORIGINS=
+      - UR_BIND_HOST=0.0.0.0
+      # 容器默认绑 0.0.0.0：必须在 config.json 设置 local_api_key 或 admin_api_key，否则 /v1 与 /api 锁定
 
 volumes:
   ur-data:

@@ -42,6 +42,9 @@ RESPONSES_PASSTHROUGH = frozenset(
         "parallel_tool_calls",
         "max_tool_calls",
         "instructions",
+        "background",
+        "conversation",
+        "prompt",
     }
 )
 

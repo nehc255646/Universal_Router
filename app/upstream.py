@@ -55,7 +55,31 @@ def build_headers(provider: ProviderConfig) -> dict[str, str]:
 
 
 def _url(provider: ProviderConfig, path: str) -> str:
+    if not path.startswith("/"):
+        path = "/" + path
     return provider.base_url.rstrip("/") + path
+
+
+async def raw_request(
+    client: httpx.AsyncClient,
+    provider: ProviderConfig,
+    method: str,
+    path: str,
+    *,
+    json_body: dict[str, Any] | None = None,
+    timeout: float = 30,
+) -> tuple[int, dict[str, Any] | bytes]:
+    """透传 GET/DELETE/POST 到上游指定路径。"""
+    url = _url(provider, path)
+    headers = build_headers(provider)
+    if json_body is None:
+        headers.pop("Content-Type", None)
+    t, _, _ = _timeouts(provider, timeout)
+    resp = await client.request(method.upper(), url, json=json_body, headers=headers, timeout=t)
+    try:
+        return resp.status_code, resp.json()
+    except Exception:
+        return resp.status_code, resp.content
 
 
 def _timeouts(provider: ProviderConfig, read: float) -> tuple[httpx.Timeout, float, float]:

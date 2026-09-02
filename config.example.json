@@ -22,6 +22,7 @@
       "display_name": "OpenAI",
       "base_url": "https://api.openai.com/v1",
       "api_key": "env:OPENAI_API_KEY",
+      "inbound_key": "",
       "upstream_mode": "chat_completions",
       "enabled": true,
       "priority": 10,
@@ -30,7 +31,7 @@
       "cost_input_per_1m": 0,
       "cost_output_per_1m": 0,
       "models": [
-        { "id": "gpt-4o", "display_name": "GPT-4o" }
+        { "id": "gpt-4o", "display_name": "GPT-4o", "upstream_id": "" }
       ],
       "headers": []
     }

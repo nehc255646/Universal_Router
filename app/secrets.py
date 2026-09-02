@@ -39,6 +39,25 @@ def _env_name(value: str) -> str | None:
     return None
 
 
+def parse_env_name(value: str | None) -> str | None:
+    """从 `env:NAME` / `${NAME}` / `$NAME` / 纯 NAME 解析环境变量名。"""
+    v = (value or "").strip()
+    if not v:
+        return None
+    named = _env_name(v)
+    if named:
+        return named
+    return v if _ENV_NAME.match(v) else None
+
+
+def to_env_ref(value: str | None) -> str:
+    """把用户输入规范成 `env:NAME`；名称不合法则抛出 ValueError。"""
+    name = parse_env_name(value)
+    if not name:
+        raise ValueError("环境变量名无效，需匹配 [A-Za-z_][A-Za-z0-9_]*")
+    return f"{REF_ENV_PREFIX}{name}"
+
+
 def resolve_secret(value: str | None) -> str:
     """明文原样返回；`env:NAME` / `${NAME}` / `$NAME` 从环境变量读取。"""
     v = (value or "").strip()
@@ -82,7 +101,7 @@ def redact_any(obj: Any, extras: list[str] | None = None) -> Any:
     if isinstance(obj, bytes):
         return redact(obj.decode(errors="ignore"), extras).encode()
     if isinstance(obj, dict):
-        sensitive = {"api_key", "authorization", "x-api-key", "admin_api_key", "local_api_key"}
+        sensitive = {"api_key", "inbound_key", "authorization", "x-api-key", "admin_api_key", "local_api_key"}
         out: dict[str, Any] = {}
         for k, v in obj.items():
             if str(k).lower() in sensitive and isinstance(v, str) and v and not is_secret_ref(v):

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+
+os.environ.setdefault("UR_ALLOW_INSECURE_BIND", "1")
+
 import pytest
 
 from app import access_log

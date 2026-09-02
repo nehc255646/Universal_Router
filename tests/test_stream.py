@@ -4,7 +4,7 @@ import asyncio
 import json
 
 from app.converter.common import parse_sse_line
-from app.stream import _extract_events, split_sse_buffer, to_chat_stream
+from app.stream import _extract_events, _normalize_responses_block, split_sse_buffer, to_chat_stream, to_responses_stream
 
 
 def test_parse_sse_variants():
@@ -83,3 +83,31 @@ def test_convert_anthropic_stream_to_chat():
     assert "Hello" in text
     assert "[DONE]" in text
     assert "chat.completion.chunk" in text
+
+
+def test_normalize_responses_injects_event_name():
+    raw = _normalize_responses_block('data: {"type":"response.output_text.delta","delta":"hi"}')
+    assert raw is not None
+    text = raw.decode()
+    assert text.startswith("event: response.output_text.delta\n")
+    assert '"delta": "hi"' in text or '"delta":"hi"' in text
+    assert _normalize_responses_block("data: [DONE]") is None
+
+
+def test_chat_text_stream_to_responses_has_usage_and_output_text():
+    async def raw():
+        yield b"data: " + json.dumps({"choices": [{"delta": {"content": "Hi"}}]}).encode() + b"\n\n"
+        yield b"data: " + json.dumps({"choices": [{"delta": {}, "finish_reason": "stop"}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}).encode() + b"\n\n"
+
+    async def collect():
+        out = []
+        async for c in to_responses_stream("chat_completions", raw(), "m"):
+            out.append(c.decode())
+        return "".join(out)
+
+    text = asyncio.run(collect())
+    assert "event: response.output_text.delta" in text
+    assert "event: response.completed" in text
+    assert "output_text" in text
+    assert "input_tokens" in text
+    assert "data: [DONE]" not in text

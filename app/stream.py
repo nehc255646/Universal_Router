@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from .converter.common import parse_sse_line, sse_format
+from .converter.chat_responses import usage_to_responses
 from .upstream import UpstreamHTTPError
 
 
@@ -151,17 +152,17 @@ def _events_responses(data: dict[str, Any]) -> list[dict[str, Any]]:
                 out.append({"kind": "tool_args", "index": idx, "arguments": item["arguments"]})
     elif t == "response.function_call_arguments.delta":
         out.append({"kind": "tool_args", "index": data.get("output_index", 0), "arguments": data.get("delta") or ""})
-    elif t in ("response.completed", "response.incomplete"):
-        resp = data.get("response") or {}
-        status = resp.get("status")
+    elif t in ("response.completed", "response.incomplete", "response.done"):
+        resp = data.get("response") or data
+        status = resp.get("status") if isinstance(resp, dict) else None
         reason = "stop"
         if t == "response.incomplete" or status == "incomplete":
             reason = "length"
-        out_items = resp.get("output") or []
+        out_items = (resp.get("output") or []) if isinstance(resp, dict) else []
         if any(isinstance(x, dict) and x.get("type") == "function_call" for x in out_items):
             reason = "tool_calls"
         out.append({"kind": "finish", "reason": reason})
-        usage = _usage_event(resp.get("usage"))
+        usage = _usage_event(resp.get("usage") if isinstance(resp, dict) else None) or _usage_event(data.get("usage"))
         if usage:
             out.append(usage)
     return out
@@ -332,12 +333,14 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
     open_index = -1
     open_src_idx = -1
     next_index = 0
+    output_items: list[dict[str, Any]] = []
+    last_usage: dict[str, Any] | None = None
 
     def emit(payload: dict[str, Any]) -> bytes:
         nonlocal seq
         seq += 1
         payload.setdefault("sequence_number", seq)
-        return sse_format(payload)
+        return sse_format(payload, event=payload.get("type"))
 
     def new_item_id(prefix: str) -> str:
         return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -354,15 +357,33 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
         nonlocal open_kind, open_item_id, open_index, open_src_idx
         chunks: list[bytes] = []
         if open_kind == "message":
-            chunks.append(emit({"type": "response.output_text.done", "item_id": open_item_id, "output_index": open_index, "text": text_acc}))
-            chunks.append(emit({"type": "response.content_part.done", "item_id": open_item_id, "output_index": open_index, "part": {"type": "output_text", "text": text_acc}}))
-            chunks.append(emit({"type": "response.output_item.done", "output_index": open_index, "item": {"id": open_item_id, "type": "message", "status": "completed", "role": "assistant"}}))
+            item = {
+                "id": open_item_id,
+                "type": "message",
+                "status": "completed",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": text_acc, "annotations": []}],
+            }
+            chunks.append(emit({"type": "response.output_text.done", "item_id": open_item_id, "output_index": open_index, "content_index": 0, "text": text_acc}))
+            chunks.append(emit({"type": "response.content_part.done", "item_id": open_item_id, "output_index": open_index, "content_index": 0, "part": {"type": "output_text", "text": text_acc, "annotations": []}}))
+            chunks.append(emit({"type": "response.output_item.done", "output_index": open_index, "item": item}))
+            output_items.append(item)
         elif open_kind == "reasoning":
+            item = {"id": open_item_id, "type": "reasoning", "status": "completed", "summary": [{"type": "summary_text", "text": reason_acc}]}
             chunks.append(emit({"type": "response.reasoning_summary_text.done", "item_id": open_item_id, "output_index": open_index, "text": reason_acc}))
-            chunks.append(emit({"type": "response.output_item.done", "output_index": open_index, "item": {"id": open_item_id, "type": "reasoning", "status": "completed"}}))
+            chunks.append(emit({"type": "response.output_item.done", "output_index": open_index, "item": item}))
+            output_items.append(item)
         elif open_kind == "tool":
             src = open_src_idx if open_src_idx >= 0 else open_index
             args = args_acc.get(src, "")
+            item = {
+                "id": open_item_id,
+                "type": "function_call",
+                "status": "completed",
+                "call_id": tool_ids.get(src, ""),
+                "name": tool_names.get(src, ""),
+                "arguments": args,
+            }
             chunks.append(
                 emit(
                     {
@@ -373,22 +394,8 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
                     }
                 )
             )
-            chunks.append(
-                emit(
-                    {
-                        "type": "response.output_item.done",
-                        "output_index": open_index,
-                        "item": {
-                            "id": open_item_id,
-                            "type": "function_call",
-                            "status": "completed",
-                            "call_id": tool_ids.get(src, ""),
-                            "name": tool_names.get(src, ""),
-                            "arguments": args,
-                        },
-                    }
-                )
-            )
+            chunks.append(emit({"type": "response.output_item.done", "output_index": open_index, "item": item}))
+            output_items.append(item)
         open_kind = None
         open_item_id = None
         open_index = -1
@@ -403,7 +410,7 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
         next_index += 1
         open_item_id = new_item_id("msg")
         chunks.append(emit({"type": "response.output_item.added", "output_index": open_index, "item": {"id": open_item_id, "type": "message", "status": "in_progress", "role": "assistant", "content": []}}))
-        chunks.append(emit({"type": "response.content_part.added", "item_id": open_item_id, "output_index": open_index, "part": {"type": "output_text", "text": ""}}))
+        chunks.append(emit({"type": "response.content_part.added", "item_id": open_item_id, "output_index": open_index, "content_index": 0, "part": {"type": "output_text", "text": "", "annotations": []}}))
         return chunks
 
     def start_reasoning() -> list[bytes]:
@@ -446,6 +453,7 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
         return chunks
 
     src_to_out: dict[int, int] = {}
+    src_to_item: dict[int, str] = {}
 
     async for ev in _iter_normalized(upstream_mode, raw):
         kind = ev.get("kind")
@@ -453,7 +461,7 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
             saw_error = True
             for c in close_open():
                 yield c
-            yield emit({"type": "response.failed", "response": {"id": resp_id, "status": "failed", "error": ev.get("error")}})
+            yield emit({"type": "response.failed", "response": {"id": resp_id, "object": "response", "status": "failed", "error": ev.get("error")}})
             yield emit({"type": "error", "error": ev.get("error")})
             break
         if kind == "text":
@@ -461,7 +469,7 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
             if open_kind != "message":
                 for c in start_message():
                     yield c
-            yield emit({"type": "response.output_text.delta", "item_id": open_item_id, "output_index": open_index, "delta": ev["text"]})
+            yield emit({"type": "response.output_text.delta", "item_id": open_item_id, "output_index": open_index, "content_index": 0, "delta": ev["text"]})
         elif kind == "reasoning":
             reason_acc += ev["text"]
             if open_kind != "reasoning":
@@ -475,6 +483,7 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
             for c in start_tool(src_idx, call_id, name):
                 yield c
             src_to_out[src_idx] = open_index
+            src_to_item[src_idx] = open_item_id or ""
         elif kind == "tool_args":
             src_idx = int(ev.get("index") or 0)
             if src_idx not in src_to_out:
@@ -483,20 +492,39 @@ async def to_responses_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
                 for c in start_tool(src_idx, call_id, name):
                     yield c
                 src_to_out[src_idx] = open_index
+                src_to_item[src_idx] = open_item_id or ""
             out_idx = src_to_out.get(src_idx, open_index)
             piece = ev.get("arguments") or ""
             args_acc[src_idx] = args_acc.get(src_idx, "") + piece
-            yield emit({"type": "response.function_call_arguments.delta", "output_index": out_idx, "delta": piece})
+            yield emit(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "item_id": src_to_item.get(src_idx) or open_item_id,
+                    "output_index": out_idx,
+                    "delta": piece,
+                }
+            )
+        elif kind == "usage":
+            last_usage = {"prompt_tokens": ev.get("prompt_tokens") or 0, "completion_tokens": ev.get("completion_tokens") or 0}
         elif kind == "finish":
             finish = ev.get("reason") or "stop"
     if saw_error:
-        yield b"data: [DONE]\n\n"
         return
     for c in close_open():
         yield c
     status = "incomplete" if finish == "length" else "completed"
-    yield emit({"type": "response.completed" if status == "completed" else "response.incomplete", "response": {"id": resp_id, "model": model, "status": status}})
-    yield b"data: [DONE]\n\n"
+    final = {
+        "id": resp_id,
+        "object": "response",
+        "created_at": int(time.time()),
+        "model": model,
+        "status": status,
+        "error": None,
+        "output": output_items,
+        "output_text": text_acc,
+        "usage": usage_to_responses(last_usage),
+    }
+    yield emit({"type": "response.completed" if status == "completed" else "response.incomplete", "response": final})
 
 
 async def to_anthropic_stream(upstream_mode: str, raw: AsyncIterator[bytes], model: str) -> AsyncIterator[bytes]:
@@ -605,6 +633,56 @@ async def to_anthropic_stream(upstream_mode: str, raw: AsyncIterator[bytes], mod
     yield sse_format({"type": "message_stop"}, event="message_stop")
 
 
+def _split_sse_blocks(buffer: str) -> tuple[list[str], str]:
+    text = buffer.replace("\r\n", "\n")
+    parts = text.split("\n\n")
+    remainder = parts.pop() if parts else ""
+    return [p for p in parts if p.strip()], remainder
+
+
+def _normalize_responses_block(block: str) -> bytes | None:
+    """给缺少 event: 的 Responses SSE 补上事件名；丢弃 Chat 风格的 [DONE]。"""
+    event_name: str | None = None
+    data_lines: list[str] = []
+    for line in block.replace("\r\n", "\n").split("\n"):
+        if line.startswith("event:"):
+            event_name = line[6:].strip()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].lstrip())
+        elif line.startswith(":"):
+            continue
+    if not data_lines:
+        return (block.rstrip() + "\n\n").encode() if block.strip() else None
+    payload = "\n".join(data_lines)
+    if payload == "[DONE]":
+        return None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return sse_format(payload, event=event_name)
+    if isinstance(data, dict):
+        ev = event_name or data.get("type")
+        return sse_format(data, event=ev)
+    return sse_format(payload, event=event_name)
+
+
+async def normalize_responses_sse(raw: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    buffer = ""
+    async for raw_chunk in raw:
+        buffer += decoder.decode(raw_chunk)
+        blocks, buffer = _split_sse_blocks(buffer)
+        for block in blocks:
+            out = _normalize_responses_block(block)
+            if out:
+                yield out
+    buffer += decoder.decode(b"", final=True)
+    if buffer.strip():
+        out = _normalize_responses_block(buffer)
+        if out:
+            yield out
+
+
 async def convert_stream(
     inbound: str,
     upstream_mode: str,
@@ -614,6 +692,10 @@ async def convert_stream(
 ) -> AsyncIterator[bytes]:
     raw = safe_upstream_stream(raw, error_sink)
     if inbound_mode(inbound) == upstream_mode:
+        if inbound == "responses":
+            async for chunk in normalize_responses_sse(raw):
+                yield chunk
+            return
         async for chunk in raw:
             yield chunk
         return

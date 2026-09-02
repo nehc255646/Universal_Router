@@ -11,7 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
-from .secrets import is_secret_ref, resolve_secret
+from .secrets import is_secret_ref, resolve_secret, to_env_ref
 
 CONFIG_PATH = Path(os.getenv("UR_CONFIG") or Path(__file__).resolve().parent.parent / "config.json")
 ID_RE = re.compile(r"^[a-z0-9\-_]+$")
@@ -19,8 +19,9 @@ UPSTREAM_MODES = {"chat_completions", "responses", "messages"}
 
 
 class ModelInfo(BaseModel):
-    id: str
+    id: str  # 客户端请求的模型 id
     display_name: str = ""
+    upstream_id: str = ""  # 发给上游的 id；为空则与 id 相同
 
 
 class HeaderInfo(BaseModel):
@@ -33,6 +34,7 @@ class ProviderConfig(BaseModel):
     display_name: str = ""
     base_url: str
     api_key: str = ""
+    inbound_key: str = ""  # 客户端调用本网关时使用；为空则与上游 api_key 相同
     upstream_mode: str = "chat_completions"
     models: list[ModelInfo] = Field(default_factory=list)
     headers: list[HeaderInfo] = Field(default_factory=list)
@@ -79,6 +81,14 @@ class ProviderConfig(BaseModel):
     @classmethod
     def validate_cost(cls, v: float) -> float:
         return max(0.0, float(v))
+
+    def upstream_model_id(self, mid: str) -> str:
+        """客户端 model id → 上游真实 id。"""
+        for m in self.models:
+            if m.id == mid:
+                mapped = (m.upstream_id or "").strip()
+                return mapped or mid
+        return mid
 
 
 ROUTE_STRATEGIES = {"priority", "round_robin", "weighted", "latency", "health", "cost"}
@@ -295,13 +305,7 @@ class ConfigManager:
     def all_api_keys(self) -> set[str]:
         keys: set[str] = set()
         for p in self._config.providers:
-            if not p.api_key:
-                continue
-            resolved = resolve_secret(p.api_key)
-            if resolved:
-                keys.add(resolved)
-            if not is_secret_ref(p.api_key):
-                keys.add(p.api_key)
+            keys.update(provider_auth_keys(p))
         return keys
 
     def all_models(self) -> list[dict[str, Any]]:
@@ -325,14 +329,15 @@ class ConfigManager:
                     if mid in seen:
                         continue
                     seen.add(mid)
-                    out.append(
-                        {
-                            "id": mid,
-                            "object": "model",
-                            "owned_by": p.id,
-                            "display_name": display,
-                        }
-                    )
+                    item = {
+                        "id": mid,
+                        "object": "model",
+                        "owned_by": p.id,
+                        "display_name": display,
+                    }
+                    if m.upstream_id and m.upstream_id != m.id:
+                        item["upstream_id"] = m.upstream_id
+                    out.append(item)
         return out
 
 
@@ -350,11 +355,33 @@ def is_loopback_bind(host: str | None) -> bool:
     return (host or "127.0.0.1").strip().lower() in LOOPBACK_HOSTS
 
 
+def _keys_from_raw(raw: str) -> set[str]:
+    keys: set[str] = set()
+    v = (raw or "").strip()
+    if not v:
+        return keys
+    resolved = resolve_secret(v)
+    if resolved:
+        keys.add(resolved)
+    if not is_secret_ref(v):
+        keys.add(v)
+    return keys
+
+
+def provider_auth_keys(p: ProviderConfig) -> set[str]:
+    """入站鉴权使用的密钥：自定义 inbound_key 优先，否则用上游 api_key。"""
+    inbound = (p.inbound_key or "").strip()
+    return _keys_from_raw(inbound) if inbound else _keys_from_raw(p.api_key)
+
+
 def provider_public_dict(p: ProviderConfig) -> dict[str, Any]:
     d = p.model_dump()
     d["has_api_key"] = bool(p.api_key)
     d["api_key_is_ref"] = is_secret_ref(p.api_key)
     d["api_key"] = p.api_key if is_secret_ref(p.api_key) else ""
+    d["has_inbound_key"] = bool(p.inbound_key)
+    d["inbound_key_is_ref"] = is_secret_ref(p.inbound_key)
+    d["inbound_key"] = p.inbound_key if is_secret_ref(p.inbound_key) else ""
     return d
 
 
@@ -384,15 +411,29 @@ def apply_incoming_server(body: dict[str, Any], existing: ServerConfig) -> dict[
     return body
 
 
+def _preserve_secret(body: dict[str, Any], field: str, existing_val: str, *, clear_flag: str) -> None:
+    if body.pop(clear_flag, False):
+        body[field] = ""
+        return
+    incoming = (body.get(field) or "").strip()
+    if not incoming or incoming.strip("*") == "":
+        body[field] = existing_val
+
+
 def apply_incoming_key(body: dict[str, Any], existing: ProviderConfig | None) -> dict[str, Any]:
-    """空密钥且未显式 clear_api_key 时保留原密钥，避免前端脱敏后覆盖。"""
+    """空密钥且未显式 clear_* 时保留原值；api_key_from_env 时规范为 env:NAME。"""
     body = dict(body)
+    from_env = bool(body.pop("api_key_from_env", False))
     if body.pop("clear_api_key", False):
         body["api_key"] = ""
-        return body
-    incoming = (body.get("api_key") or "").strip()
-    if existing and (not incoming or incoming.strip("*") == ""):
-        body["api_key"] = existing.api_key
+    else:
+        incoming = (body.get("api_key") or "").strip()
+        if existing and (not incoming or incoming.strip("*") == ""):
+            body["api_key"] = existing.api_key
+        elif from_env and incoming:
+            body["api_key"] = to_env_ref(incoming)
+    existing_inbound = existing.inbound_key if existing else ""
+    _preserve_secret(body, "inbound_key", existing_inbound, clear_flag="clear_inbound_key")
     return body
 
 

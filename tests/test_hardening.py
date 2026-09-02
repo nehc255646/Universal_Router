@@ -17,7 +17,7 @@ from app.health import (
 from app.ir import items_to_messages, messages_to_items
 from app.main import app
 from app.router import resolve_providers
-from app.secrets import is_secret_ref, redact, resolve_secret
+from app.secrets import is_secret_ref, parse_env_name, redact, resolve_secret, to_env_ref
 from app.stream import _extract_events, to_chat_stream, to_responses_stream
 from app.upstream import build_headers
 
@@ -30,6 +30,9 @@ def test_secret_refs(monkeypatch):
     assert not is_secret_ref("sk-literal")
     assert resolve_secret("env:UR_TEST_KEY") == "sk-from-env-123456"
     assert resolve_secret("${UR_TEST_KEY}") == "sk-from-env-123456"
+    assert parse_env_name("OPENAI_API_KEY") == "OPENAI_API_KEY"
+    assert parse_env_name("env:OPENAI_API_KEY") == "OPENAI_API_KEY"
+    assert to_env_ref("$FOO_BAR") == "env:FOO_BAR"
 
 
 def test_redact_keys():
@@ -178,6 +181,9 @@ def test_responses_lifecycle_from_chat_tools():
         "response.completed",
     ):
         assert ev in text
+        assert f"event: {ev}" in text
+    assert "input_tokens" in text
+    assert '"output"' in text
 
 
 def test_midstream_error_to_chat():

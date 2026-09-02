@@ -3,8 +3,9 @@ function app() {
     providers: [],
     selectedId: null,
     selected: null,
-    form: { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 },
+    form: { id: '', display_name: '', base_url: '', api_key: '', inbound_key: '', use_env_key: false, upstream_mode: 'chat_completions', models: [], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 },
     showKey: false,
+    showInboundKey: false,
     msg: '',
     msgOk: true,
     testResult: '',
@@ -26,11 +27,11 @@ function app() {
     status: null,
     presets: [
       { id: 'openai', display_name: 'OpenAI', base_url: 'https://api.openai.com/v1', upstream_mode: 'chat_completions', models: [{id:'gpt-4o', display_name:'GPT-4o'}, {id:'gpt-4o-mini', display_name:'GPT-4o mini'}] },
-      { id: 'anthropic', display_name: 'Anthropic', base_url: 'https://api.anthropic.com/v1', upstream_mode: 'messages', models: [{id:'claude-sonnet-4-20250514', display_name:'Claude Sonnet 4'}, {id:'claude-3-5-haiku-latest', display_name:'Haiku'}] },
-      { id: 'openrouter', display_name: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', upstream_mode: 'chat_completions', models: [{id:'openai/gpt-4o', display_name:'GPT-4o'}, {id:'anthropic/claude-sonnet-4', display_name:'Claude Sonnet 4'}] },
+      { id: 'anthropic', display_name: 'Anthropic', base_url: 'https://api.anthropic.com/v1', upstream_mode: 'messages', models: [{id:'claude-sonnet-4-5', display_name:'Claude Sonnet 4.5'}, {id:'claude-haiku-4-5', display_name:'Claude Haiku 4.5'}] },
+      { id: 'openrouter', display_name: 'OpenRouter', base_url: 'https://openrouter.ai/api/v1', upstream_mode: 'chat_completions', models: [{id:'openai/gpt-4o', display_name:'GPT-4o'}, {id:'anthropic/claude-sonnet-4.5', display_name:'Claude Sonnet 4.5'}] },
       { id: 'deepseek', display_name: 'DeepSeek', base_url: 'https://api.deepseek.com/v1', upstream_mode: 'chat_completions', models: [{id:'deepseek-chat', display_name:'DeepSeek Chat'}, {id:'deepseek-reasoner', display_name:'DeepSeek Reasoner'}] },
     ],
-    play: { model: '', protocol: 'chat', stream: true, system: '', prompt: '', output: '', reasoning: '', loading: false, error: '' },
+    play: { model: '', protocol: 'chat', stream: true, tools: false, system: '', prompt: '', output: '', reasoning: '', loading: false, error: '' },
 
     async init() {
       await this.refresh();
@@ -148,14 +149,40 @@ function app() {
       if (!p) { this.selected=null; return; }
       this.selected = p;
       this.form = JSON.parse(JSON.stringify(p));
-      if (!p.api_key_is_ref) this.form.api_key = '';
+      this.form.use_env_key = !!p.api_key_is_ref;
+      if (p.api_key_is_ref) this.form.api_key = this.envName(p.api_key);
+      else this.form.api_key = '';
+      this.form.inbound_key = p.inbound_key_is_ref ? p.inbound_key : '';
       this.msg=''; this.testResult='';
       this.tab = 'config';
+    },
+    envName(v) {
+      v = (v || '').trim();
+      if (v.toLowerCase().startsWith('env:')) return v.slice(4).trim();
+      if (v.startsWith('${') && v.endsWith('}')) return v.slice(2, -1).trim();
+      if (v.startsWith('$')) return v.slice(1);
+      return v;
+    },
+    emptyForm() {
+      return { id: '', display_name: '', base_url: '', api_key: '', inbound_key: '', use_env_key: false, has_api_key: false, has_inbound_key: false, api_key_is_ref: false, inbound_key_is_ref: false, upstream_mode: 'chat_completions', models: [{id:'',display_name:'',upstream_id:''}], headers: [], enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 };
+    },
+    onToggleEnvKey() {
+      if (this.form.use_env_key) {
+        const v = (this.form.api_key || '').trim();
+        if (!v) return;
+        if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(v) || v.toLowerCase().startsWith('env:') || v.startsWith('$')) {
+          this.form.api_key = this.envName(v);
+        } else {
+          this.form.api_key = '';
+        }
+      } else if (this.form.api_key_is_ref) {
+        this.form.api_key = '';
+      }
     },
     addProvider() {
       this.selectedId = null;
       this.selected = { id: '' };
-      this.form = { id: '', display_name: '', base_url: '', api_key: '', upstream_mode: 'chat_completions', models: [{id:'',display_name:''}], headers: [], has_api_key: false, enabled: true, priority: 100, weight: 1, timeout_s: 120, cost_input_per_1m: 0, cost_output_per_1m: 0 };
+      this.form = this.emptyForm();
       this.msg=''; this.testResult='';
       this.tab = 'config';
     },
@@ -177,7 +204,10 @@ function app() {
         url = `/api/providers/${this.selectedId}`; method='PUT';
       }
       const body = {...this.form, models: this.form.models.filter(m=>m.id && m.id.trim()), headers: this.form.headers.filter(h=>h.name && h.name.trim())};
+      if (body.use_env_key) body.api_key_from_env = true;
+      delete body.use_env_key;
       if (!body.api_key) delete body.api_key;
+      if (!body.inbound_key) delete body.inbound_key;
       const r = await this.api(url, {method, body: JSON.stringify(body)});
       const data = await r.json();
       if (!r.ok) { this.toast(data.detail || JSON.stringify(data), false); return; }
@@ -185,13 +215,28 @@ function app() {
       await this.refresh();
       this.select(data.id);
     },
+    providerSaveBody(extra={}) {
+      const body = {...this.form, models: this.form.models.filter(m=>m.id && m.id.trim()), headers: this.form.headers.filter(h=>h.name && h.name.trim()), ...extra};
+      delete body.use_env_key;
+      return body;
+    },
     async clearKey() {
-      if (!this.selectedId) { this.form.api_key=''; this.form.has_api_key=false; return; }
-      const body = {...this.form, api_key:'', clear_api_key:true, models: this.form.models.filter(m=>m.id && m.id.trim()), headers: this.form.headers.filter(h=>h.name && h.name.trim())};
+      if (!this.selectedId) { this.form.api_key=''; this.form.has_api_key=false; this.form.use_env_key=false; return; }
+      const body = this.providerSaveBody({ api_key:'', clear_api_key:true });
       const r = await this.api(`/api/providers/${this.selectedId}`, {method:'PUT', body: JSON.stringify(body)});
       const data = await r.json();
       if (!r.ok) { this.toast(data.detail || JSON.stringify(data), false); return; }
       this.toast('密钥已清除', true);
+      await this.refresh();
+      this.select(data.id);
+    },
+    async clearInboundKey() {
+      if (!this.selectedId) { this.form.inbound_key=''; this.form.has_inbound_key=false; return; }
+      const body = this.providerSaveBody({ inbound_key:'', clear_inbound_key:true });
+      const r = await this.api(`/api/providers/${this.selectedId}`, {method:'PUT', body: JSON.stringify(body)});
+      const data = await r.json();
+      if (!r.ok) { this.toast(data.detail || JSON.stringify(data), false); return; }
+      this.toast('已恢复为上游密钥', true);
       await this.refresh();
       this.select(data.id);
     },
@@ -222,7 +267,7 @@ function app() {
         if (!r.ok || !data.ok) { this.toast((data.error && JSON.stringify(data.error)) || '拉取失败', false); return; }
         const existing = new Set(this.form.models.map(m=>m.id));
         for (const m of data.models) {
-          if (!existing.has(m.id)) this.form.models.push({id: m.id, display_name: m.display_name || m.id});
+          if (!existing.has(m.id)) this.form.models.push({id: m.id, display_name: m.display_name || m.id, upstream_id: ''});
         }
         this.toast(`已合并 ${data.models.length} 个上游模型`, true);
       } catch(e) { this.toast(String(e), false); }
@@ -277,17 +322,25 @@ print(r.choices[0].message.content)`;
       const messages = [];
       if (this.play.system.trim()) messages.push({role:'system', content: this.play.system.trim()});
       messages.push({role:'user', content: this.play.prompt.trim()});
+      const sampleTool = {
+        name: 'get_weather',
+        description: 'Get weather for a city',
+        parameters: { type: 'object', properties: { city: { type: 'string' } }, required: ['city'] },
+      };
       let path = '/api/play/chat';
       let body = { model: this.play.model, messages, stream: this.play.stream };
+      if (this.play.tools) body.tools = [{ type: 'function', function: sampleTool }];
       if (this.play.protocol === 'responses') {
         path = '/api/play/responses';
         body = { model: this.play.model, input: messages, stream: this.play.stream };
         if (this.play.system.trim()) body.instructions = this.play.system.trim();
+        if (this.play.tools) body.tools = [{ type: 'function', name: sampleTool.name, description: sampleTool.description, parameters: sampleTool.parameters }];
       } else if (this.play.protocol === 'messages') {
         path = '/api/play/messages';
         const sys = messages.filter(m=>m.role==='system').map(m=>m.content).join('\n');
         body = { model: this.play.model, messages: messages.filter(m=>m.role!=='system'), max_tokens: 1024, stream: this.play.stream };
         if (sys) body.system = sys;
+        if (this.play.tools) body.tools = [{ name: sampleTool.name, description: sampleTool.description, input_schema: sampleTool.parameters }];
       }
       try {
         const r = await this.api(path, { method:'POST', body: JSON.stringify(body) });
